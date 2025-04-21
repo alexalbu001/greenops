@@ -23,7 +23,7 @@ type EmbeddingResult struct {
 // embedText calls Bedrock to get embeddings for the input text
 // It handles both V2 and legacy embedding schemas, and attempts to
 // extract the embedding vector from various possible response formats.
-func embedText(ctx context.Context, client *bedrockruntime.Client, modelID, text string) ([]float64, error) {
+func EmbedText(ctx context.Context, client *bedrockruntime.Client, modelID, text string) ([]float64, error) {
 	var body []byte
 	var err error
 

@@ -1,0 +1,7 @@
+.terraform
+*.zip
+main
+greenops
+bootstrap
+*.tfstate*
+test-*

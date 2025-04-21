@@ -22,7 +22,9 @@ type AnalysisResult struct {
 
 // analyzeInstance sends a prompt about an EC2 record to a Bedrock text model
 // and returns the completion text. It handles Titan, Lite V1, and Claude schemas.
-func analyzeInstance(ctx context.Context, client *bedrockruntime.Client, invocationID, recordJSON string, cpuAvg float64) (string, error) {
+// analyzeInstance sends a prompt about an EC2 record to a Bedrock text model
+// and returns the completion text. It handles Titan, Lite V1, and Claude schemas.
+func AnalyzeInstance(ctx context.Context, client *bedrockruntime.Client, invocationID, recordJSON string, cpuAvg float64) (string, error) {
 	// Compose prompt
 	prompt := fmt.Sprintf(`Here is an EC2 instance record:
 %s
@@ -37,30 +39,15 @@ Metrics: 7-day average CPU utilization of %.1f%%.
 	var body []byte
 	var err error
 
-	switch {
-	case strings.Contains(invocationID, "text-lite-v1"):
-		// Titan Text Lite V1 schema
-		payload := map[string]interface{}{
-			"inputText": prompt,
-			"textGenerationConfig": map[string]interface{}{
-				"maxTokenCount": 300,
-				"stopSequences": []string{},
-				"temperature":   0.0,
-				"topP":          1.0,
-			},
-		}
-		body, err = json.Marshal(payload)
-
-	case strings.Contains(invocationID, "anthropic"), strings.Contains(invocationID, "claude"):
-		// Claude schema for Bedrock: follow Anthropic spec
+	// Check if it's an inference profile (contains "inference-profile" in the ARN)
+	if strings.Contains(invocationID, "inference-profile") &&
+		(strings.Contains(invocationID, "anthropic") || strings.Contains(invocationID, "claude")) {
+		// Claude 3 schema for Bedrock via inference profile
 		payload := map[string]interface{}{
 			"anthropic_version": "bedrock-2023-05-31",
-			"max_tokens":        300,
-			"top_k":             250,
-			"stop_sequences":    []string{},
+			"max_tokens":        800,
 			"temperature":       0.0,
-			"top_p":             1.0,
-			"messages": []map[string]interface{}{ // array of message objects
+			"messages": []map[string]interface{}{
 				{
 					"role": "user",
 					"content": []map[string]string{
@@ -70,8 +57,34 @@ Metrics: 7-day average CPU utilization of %.1f%%.
 			},
 		}
 		body, err = json.Marshal(payload)
-
-	default:
+	} else if strings.Contains(invocationID, "anthropic") || strings.Contains(invocationID, "claude") {
+		// Standard Claude model (not an inference profile)
+		payload := map[string]interface{}{
+			"anthropic_version": "bedrock-2023-05-31",
+			"max_tokens":        300,
+			"temperature":       0.0,
+			"messages": []map[string]interface{}{
+				{
+					"role": "user",
+					"content": []map[string]string{
+						{"type": "text", "text": prompt},
+					},
+				},
+			},
+		}
+		body, err = json.Marshal(payload)
+	} else if strings.Contains(invocationID, "text-lite-v1") {
+		// Titan Text Lite V1 schema
+		payload := map[string]interface{}{
+			"inputText": prompt,
+			"textGenerationConfig": map[string]interface{}{
+				"maxTokenCount": 300,
+				"temperature":   0.0,
+				"topP":          1.0,
+			},
+		}
+		body, err = json.Marshal(payload)
+	} else {
 		// Legacy Titan schema
 		payload := map[string]interface{}{
 			"prompt":      prompt,
@@ -80,9 +93,13 @@ Metrics: 7-day average CPU utilization of %.1f%%.
 		}
 		body, err = json.Marshal(payload)
 	}
+
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal payload: %w", err)
 	}
+
+	// Log what we're about to send
+	log.Printf("Invoking model ID: %s with payload: %s", invocationID, string(body))
 
 	// Invoke model/profile
 	resp, err := client.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
@@ -97,7 +114,52 @@ Metrics: 7-day average CPU utilization of %.1f%%.
 	data := resp.Body
 	log.Printf("Raw generation response: %s", string(data))
 
-	// Parse possible response formats
+	// Parse Claude 3.7 response format (updated for newer models)
+	var claudeResp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(data, &claudeResp); err == nil && len(claudeResp.Content) > 0 {
+		var sb strings.Builder
+		for _, content := range claudeResp.Content {
+			if content.Type == "text" {
+				sb.WriteString(content.Text)
+			}
+		}
+		if sb.Len() > 0 {
+			return sb.String(), nil
+		}
+	}
+
+	// If that didn't work, try parsing as an assistant message
+	var assistantResp struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(data, &assistantResp); err == nil &&
+		assistantResp.Type == "message" &&
+		assistantResp.Message.Role == "assistant" &&
+		len(assistantResp.Message.Content) > 0 {
+		var sb strings.Builder
+		for _, content := range assistantResp.Message.Content {
+			if content.Type == "text" {
+				sb.WriteString(content.Text)
+			}
+		}
+		if sb.Len() > 0 {
+			return sb.String(), nil
+		}
+	}
+
+	// Try standard response patterns (existing code)
 	var wrap map[string]interface{}
 	if err := json.Unmarshal(data, &wrap); err == nil {
 		// Titan legacy completion
@@ -146,6 +208,8 @@ Metrics: 7-day average CPU utilization of %.1f%%.
 			}
 		}
 	}
-	// Fallback to raw string
+
+	// Log an error before returning the raw response
+	log.Printf("Warning: Unable to parse model response into expected format. Returning raw response.")
 	return string(data), nil
 }

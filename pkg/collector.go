@@ -30,7 +30,7 @@ type Instance struct {
 }
 
 // listInstances retrieves all running EC2 instances and calculates their 7-day avg CPU utilization
-func listInstances(
+func ListInstances(
 	ctx context.Context,
 	ec2Client *ec2.Client,
 	cwClient *cloudwatch.Client,
