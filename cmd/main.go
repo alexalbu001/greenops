@@ -28,12 +28,18 @@ type ReportItem struct {
 }
 
 // Handler is the Lambda entrypoint
+// Handler is the Lambda entrypoint
 func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	log.Printf("Received event: %s", apiReq.RawPath)
 
 	// Check if this is a job status request
 	if apiReq.RouteKey == "GET /jobs/{id}" {
 		return HandleJobStatus(ctx, apiReq)
+	}
+
+	// New route: direct results access by job ID
+	if apiReq.RouteKey == "GET /jobs/{id}/results" {
+		return HandleJobResults(ctx, apiReq)
 	}
 
 	// Original analyze request
@@ -109,8 +115,70 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 	}, nil
 }
 
+// New function to handle direct results access
+func HandleJobResults(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	jobID := apiReq.PathParameters["id"]
+	if jobID == "" {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 400,
+			Body:       `{"error":"missing job ID"}`,
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Load AWS config
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to initialize AWS client: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Create DynamoDB client
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	// Get job directly from DynamoDB
+	log.Printf("Getting results for job %s", jobID)
+	job, err := pkg.GetJob(ctx, dynamoClient, jobID)
+	if err != nil {
+		if err.Error() == "job not found" {
+			return events.APIGatewayV2HTTPResponse{
+				StatusCode: 404,
+				Body:       `{"error":"job not found"}`,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+			}, nil
+		}
+
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to get job: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Return just the results array, even if job is not completed
+	resultsJSON, err := json.Marshal(job.Results)
+	if err != nil {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to marshal results: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Log the number of results for debugging
+	log.Printf("Returning %d results for job %s", len(job.Results), jobID)
+
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: 200,
+		Body:       fmt.Sprintf(`{"results":%s}`, string(resultsJSON)),
+		Headers:    map[string]string{"Content-Type": "application/json"},
+	}, nil
+}
+
 // HandleJobStatus handles GET /jobs/{id} requests
-// HandleJobStatus handles GET /jobs/{id} requests - function in cmd/main.go
 func HandleJobStatus(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	jobID := apiReq.PathParameters["id"]
 	if jobID == "" {
@@ -119,6 +187,12 @@ func HandleJobStatus(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest)
 			Body:       `{"error":"missing job ID"}`,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 		}, nil
+	}
+
+	// Check for force_complete parameter
+	forceComplete := false
+	if apiReq.QueryStringParameters != nil {
+		_, forceComplete = apiReq.QueryStringParameters["force_complete"]
 	}
 
 	// Load AWS config
@@ -152,33 +226,78 @@ func HandleJobStatus(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest)
 		}, nil
 	}
 
-	// If job is still processing, return progress
-	if job.Status != pkg.JobStatusCompleted && job.Status != pkg.JobStatusFailed {
+	// If forceComplete=true and all items are processed, update status to completed
+	if forceComplete &&
+		job.Status == pkg.JobStatusProcessing &&
+		(job.CompletedItems+job.FailedItems >= job.TotalItems) {
+
+		newStatus := pkg.JobStatusCompleted
+		if job.FailedItems > 0 && job.FailedItems == job.TotalItems {
+			newStatus = pkg.JobStatusFailed
+		}
+
+		log.Printf("Forcing job %s status from %s to %s", jobID, job.Status, newStatus)
+		err = pkg.UpdateJobStatus(ctx, dynamoClient, jobID, newStatus)
+		if err != nil {
+			log.Printf("Warning: Failed to force update job status: %v", err)
+		} else {
+			// Update local job object to reflect new status
+			job.Status = newStatus
+		}
+	}
+
+	// Job is in a terminal state (completed or failed), return full result
+	if job.Status == pkg.JobStatusCompleted || job.Status == pkg.JobStatusFailed {
+		resultsJSON, err := json.Marshal(job.Results)
+		if err != nil {
+			return events.APIGatewayV2HTTPResponse{
+				StatusCode: 500,
+				Body:       fmt.Sprintf(`{"error":"failed to marshal results: %v"}`, err),
+				Headers:    map[string]string{"Content-Type": "application/json"},
+			}, nil
+		}
+
 		return events.APIGatewayV2HTTPResponse{
-			StatusCode: 202, // Accepted
+			StatusCode: 200,
 			Body: fmt.Sprintf(
-				`{"job_id":"%s","status":"%s","total_items":%d,"completed_items":%d,"failed_items":%d}`,
-				job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems,
+				`{"job_id":"%s","status":"%s","total_items":%d,"completed_items":%d,"failed_items":%d,"results":%s}`,
+				job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems, string(resultsJSON),
 			),
 			Headers: map[string]string{"Content-Type": "application/json"},
 		}, nil
 	}
 
-	// Job completed or failed, return full result
-	resultsJSON, err := json.Marshal(job.Results)
-	if err != nil {
+	// Special case: if all items are processed but status is still "processing"
+	// Return HTTP 200 instead of 202 and include the results
+	if job.Status == pkg.JobStatusProcessing && (job.CompletedItems+job.FailedItems >= job.TotalItems) {
+		log.Printf("All items for job %s are processed but status is still %s. Returning results anyway.",
+			job.JobID, job.Status)
+
+		resultsJSON, err := json.Marshal(job.Results)
+		if err != nil {
+			return events.APIGatewayV2HTTPResponse{
+				StatusCode: 500,
+				Body:       fmt.Sprintf(`{"error":"failed to marshal results: %v"}`, err),
+				Headers:    map[string]string{"Content-Type": "application/json"},
+			}, nil
+		}
+
 		return events.APIGatewayV2HTTPResponse{
-			StatusCode: 500,
-			Body:       fmt.Sprintf(`{"error":"failed to marshal results: %v"}`, err),
-			Headers:    map[string]string{"Content-Type": "application/json"},
+			StatusCode: 200, // Return OK instead of Accepted in this case
+			Body: fmt.Sprintf(
+				`{"job_id":"%s","status":"%s","total_items":%d,"completed_items":%d,"failed_items":%d,"results":%s}`,
+				job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems, string(resultsJSON),
+			),
+			Headers: map[string]string{"Content-Type": "application/json"},
 		}, nil
 	}
 
+	// Job is still processing, return progress
 	return events.APIGatewayV2HTTPResponse{
-		StatusCode: 200,
+		StatusCode: 202, // Accepted
 		Body: fmt.Sprintf(
-			`{"job_id":"%s","status":"%s","total_items":%d,"completed_items":%d,"failed_items":%d,"results":%s}`,
-			job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems, string(resultsJSON),
+			`{"job_id":"%s","status":"%s","total_items":%d,"completed_items":%d,"failed_items":%d}`,
+			job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems,
 		),
 		Headers: map[string]string{"Content-Type": "application/json"},
 	}, nil

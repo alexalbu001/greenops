@@ -6,3 +6,6 @@ bootstrap
 *.tfstate*
 test-*
 build*
+!worker/*
+worker
+*results*

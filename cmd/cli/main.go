@@ -102,6 +102,9 @@ func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, clien
 	}
 	jobURL := fmt.Sprintf("%s/jobs/%s", baseURL, jobID)
 
+	var lastCompletedItems int = 0
+	var noProgressCounter int = 0
+
 	for attempt := 0; attempt < maxPollRetry; attempt++ {
 		log.Printf("Polling job status (attempt %d/%d)...", attempt+1, maxPollRetry)
 
@@ -121,35 +124,8 @@ func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, clien
 			return nil, fmt.Errorf("failed to read job status response: %v", err)
 		}
 
-		if resp.StatusCode == http.StatusAccepted {
-			// Job still processing
-			var statusResp struct {
-				JobID          string `json:"job_id"`
-				Status         string `json:"status"`
-				TotalItems     int    `json:"total_items"`
-				CompletedItems int    `json:"completed_items"`
-				FailedItems    int    `json:"failed_items"`
-			}
-
-			err = json.Unmarshal(body, &statusResp)
-			if err != nil {
-				log.Printf("Warning: Failed to parse job status: %v", err)
-			} else {
-				log.Printf("Job status: %s (%d/%d items processed, %d failed)",
-					statusResp.Status, statusResp.CompletedItems, statusResp.TotalItems, statusResp.FailedItems)
-			}
-
-			// Wait before next poll
-			time.Sleep(time.Duration(pollInterval) * time.Second)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("API returned error status %d: %s", resp.StatusCode, body)
-		}
-
-		// Job completed
-		var result struct {
+		// Try to parse the full response first (works if job is completed)
+		var fullResult struct {
 			JobID          string           `json:"job_id"`
 			Status         string           `json:"status"`
 			TotalItems     int              `json:"total_items"`
@@ -158,13 +134,131 @@ func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, clien
 			Results        []pkg.ReportItem `json:"results"`
 		}
 
-		err = json.Unmarshal(body, &result)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse job results: %v", err)
+		err = json.Unmarshal(body, &fullResult)
+
+		// Check if we already have completed status and results
+		if err == nil && (fullResult.Status == "completed" || fullResult.Status == "failed") && len(fullResult.Results) > 0 {
+			log.Printf("Job complete: %s - %d/%d items processed, %d failed",
+				fullResult.Status, fullResult.CompletedItems, fullResult.TotalItems, fullResult.FailedItems)
+			return fullResult.Results, nil
 		}
 
-		log.Printf("Job completed: %d items processed, %d failed", result.CompletedItems, result.FailedItems)
-		return result.Results, nil
+		// If not completed or couldn't parse full result, parse basic status
+		var statusResp struct {
+			JobID          string          `json:"job_id"`
+			Status         string          `json:"status"`
+			TotalItems     int             `json:"total_items"`
+			CompletedItems int             `json:"completed_items"`
+			FailedItems    int             `json:"failed_items"`
+			Results        json.RawMessage `json:"results"`
+		}
+
+		err = json.Unmarshal(body, &statusResp)
+		if err != nil {
+			log.Printf("Warning: Failed to parse job status: %v", err)
+			time.Sleep(time.Duration(pollInterval) * time.Second)
+			continue
+		}
+
+		log.Printf("Job status: %s (%d/%d items processed, %d failed)",
+			statusResp.Status, statusResp.CompletedItems, statusResp.TotalItems, statusResp.FailedItems)
+
+		// See if we can parse results directly from the response
+		if statusResp.Results != nil && len(statusResp.Results) > 2 { // More than just '[]'
+			var reportItems []pkg.ReportItem
+			if err := json.Unmarshal(statusResp.Results, &reportItems); err == nil && len(reportItems) > 0 {
+				log.Printf("Successfully parsed %d report items from response", len(reportItems))
+				if statusResp.CompletedItems == statusResp.TotalItems ||
+					(statusResp.CompletedItems+statusResp.FailedItems >= statusResp.TotalItems) {
+					return reportItems, nil
+				}
+			}
+		}
+
+		// If the status is still "processing"
+		if statusResp.Status == "processing" {
+			// Check if all items are processed, even if status hasn't been updated yet
+			if statusResp.CompletedItems+statusResp.FailedItems >= statusResp.TotalItems {
+				noProgressCounter++
+
+				// If all items are processed but status hasn't changed for 3 consecutive polls,
+				// consider the job complete and force a return with the results
+				if noProgressCounter >= 3 {
+					log.Printf("All items processed but job status still '%s'. Forcing completion after %d polls with no status change.",
+						statusResp.Status, noProgressCounter)
+
+					// Make a specific call to get the full job details
+					// This is a more explicit call that should return complete data
+					req, err := http.NewRequestWithContext(ctx, "GET",
+						fmt.Sprintf("%s/jobs/%s?force_complete=true", baseURL, jobID), nil)
+					if err == nil {
+						forceResp, err := client.Do(req)
+						if err == nil && forceResp.StatusCode == http.StatusOK {
+							forceBody, err := io.ReadAll(forceResp.Body)
+							forceResp.Body.Close()
+							if err == nil {
+								var forceResult struct {
+									Results []pkg.ReportItem `json:"results"`
+								}
+
+								if err := json.Unmarshal(forceBody, &forceResult); err == nil && len(forceResult.Results) > 0 {
+									log.Printf("Successfully retrieved %d report items by force completion",
+										len(forceResult.Results))
+									return forceResult.Results, nil
+								}
+							}
+						}
+					}
+
+					// If we get here, we couldn't get the results by forcing completion
+					// Just return an empty array rather than timing out
+					log.Printf("WARNING: Forced completion, but couldn't retrieve results. Returning empty result set.")
+					return []pkg.ReportItem{}, nil
+				}
+			} else {
+				// Reset counter if we see progress
+				if statusResp.CompletedItems > lastCompletedItems {
+					lastCompletedItems = statusResp.CompletedItems
+					noProgressCounter = 0
+				}
+			}
+
+			// Wait before next poll
+			time.Sleep(time.Duration(pollInterval) * time.Second)
+			continue
+		}
+
+		// Handle non-processing status that's not already handled above
+		if statusResp.Status != "processing" {
+			// For completed or failed status but without results in direct response
+			req, err := http.NewRequestWithContext(ctx, "GET", jobURL, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create final results request: %v", err)
+			}
+
+			finalResp, err := client.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get final results: %v", err)
+			}
+
+			finalBody, err := io.ReadAll(finalResp.Body)
+			finalResp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read final results response: %v", err)
+			}
+
+			// Try to get results from the response
+			var finalResult struct {
+				Results []pkg.ReportItem `json:"results"`
+			}
+			if err := json.Unmarshal(finalBody, &finalResult); err == nil && len(finalResult.Results) > 0 {
+				return finalResult.Results, nil
+			}
+
+			// If we still don't have results, return an empty array
+			log.Printf("WARNING: Job is %s but no results found. Returning empty result set.", statusResp.Status)
+			return []pkg.ReportItem{}, nil
+		}
 	}
 
 	return nil, fmt.Errorf("maximum polling attempts reached - job may still be running")

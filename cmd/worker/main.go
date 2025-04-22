@@ -1,5 +1,3 @@
-// Create cmd/worker/main.go
-
 package main
 
 import (
@@ -131,16 +129,31 @@ func processEC2Instance(
 
 	// Check if job is complete
 	job, err := pkg.GetJob(ctx, dynamoClient, workItem.JobID)
-	if err == nil && job.CompletedItems+job.FailedItems >= job.TotalItems {
-		// All items processed - update job status
-		status := pkg.JobStatusCompleted
-		if job.FailedItems > 0 && job.FailedItems == job.TotalItems {
-			status = pkg.JobStatusFailed
+	if err == nil {
+		log.Printf("Job status check: JobID=%s, Completed=%d, Failed=%d, Total=%d",
+			job.JobID, job.CompletedItems, job.FailedItems, job.TotalItems)
+
+		// Fixed: If all items are processed (completed + failed >= total)
+		// And the job isn't already in a terminal state
+		if (job.CompletedItems+job.FailedItems >= job.TotalItems) &&
+			(job.Status != pkg.JobStatusCompleted && job.Status != pkg.JobStatusFailed) {
+
+			// Determine final status
+			status := pkg.JobStatusCompleted
+			if job.FailedItems > 0 && job.FailedItems == job.TotalItems {
+				status = pkg.JobStatusFailed
+			}
+
+			log.Printf("All items processed. Updating job %s status to %s", job.JobID, status)
+			err = pkg.UpdateJobStatus(ctx, dynamoClient, workItem.JobID, status)
+			if err != nil {
+				log.Printf("Failed to update job status: %v", err)
+			} else {
+				log.Printf("Successfully updated job status to %s", status)
+			}
 		}
-		err = pkg.UpdateJobStatus(ctx, dynamoClient, workItem.JobID, status)
-		if err != nil {
-			log.Printf("Failed to update job status: %v", err)
-		}
+	} else {
+		log.Printf("Failed to get job for status update: %v", err)
 	}
 
 	return nil
