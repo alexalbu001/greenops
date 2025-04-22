@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	pkg "github.com/alexalbu001/greenops/pkg"
 )
@@ -28,9 +28,16 @@ type ReportItem struct {
 }
 
 // Handler is the Lambda entrypoint
-// Handler is the Lambda entrypoint
 func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	log.Printf("Received event: %s", apiReq.Body)
+	log.Printf("Received event: %s", apiReq.RawPath)
+
+	// Check if this is a job status request
+	if apiReq.RouteKey == "GET /jobs/{id}" {
+		return HandleJobStatus(ctx, apiReq)
+	}
+
+	// Original analyze request
+	log.Printf("Received analyze request: %s", apiReq.Body)
 
 	var req ServerRequest
 	if err := json.Unmarshal([]byte(apiReq.Body), &req); err != nil {
@@ -52,7 +59,7 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 		}, nil
 	}
 
-	// Load AWS config for Bedrock
+	// Load AWS config for Bedrock, DynamoDB, and SQS
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		log.Printf("unable to load AWS config: %v", err)
@@ -62,107 +69,119 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 			Headers:    map[string]string{"Content-Type": "application/json"},
 		}, nil
 	}
-	brClient := bedrockruntime.NewFromConfig(cfg)
 
-	// Model IDs from env with logging
-	embedModel := os.Getenv("EMBED_MODEL_ID")
-	if embedModel == "" {
-		embedModel = "amazon.titan-embed-text-v2:0"
-	}
-	log.Printf("Using embedding model: %s", embedModel)
+	// Create AWS service clients
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+	sqsClient := sqs.NewFromConfig(cfg)
 
-	genID := os.Getenv("GEN_PROFILE_ARN")
-	if genID == "" {
-		genID = os.Getenv("GEN_MODEL_ID")
-		if genID == "" {
-			genID = "arn:aws:bedrock:eu-west-1:767048271788:inference-profile/eu.anthropic.claude-3-7-sonnet-20250219-v1:0"
-		}
-	}
-	log.Printf("Using generation model/profile: %s", genID)
-
-	// Build report with proper error handling
-	var report []ReportItem
-	var processingErrors []string
-
-	for _, inst := range req.Instances {
-		data, err := json.Marshal(inst)
-		if err != nil {
-			errMsg := fmt.Sprintf("failed to marshal instance %s: %v", inst.InstanceID, err)
-			log.Printf(errMsg)
-			processingErrors = append(processingErrors, errMsg)
-			continue
-		}
-		record := string(data)
-
-		// Embedding phase
-		emb, err := pkg.EmbedText(ctx, brClient, embedModel, record)
-		if err != nil {
-			errMsg := fmt.Sprintf("embed error for %s: %v", inst.InstanceID, err)
-			log.Printf(errMsg)
-			processingErrors = append(processingErrors, errMsg)
-			continue
-		}
-
-		// Analysis phase
-		analysis, err := pkg.AnalyzeInstance(ctx, brClient, genID, record, inst.CPUAvg7d)
-		if err != nil {
-			errMsg := fmt.Sprintf("analysis error for %s: %v", inst.InstanceID, err)
-			log.Printf(errMsg)
-			processingErrors = append(processingErrors, errMsg)
-			// Still add the item to the report but with an error message as analysis
-			analysis = fmt.Sprintf("ERROR: Failed to analyze instance: %v", err)
-		}
-
-		// Add successfully processed item to report
-		report = append(report, ReportItem{inst, emb, analysis})
-	}
-
-	// Check if we have anything to return
-	if len(report) == 0 {
-		log.Printf("no instances were successfully processed")
+	// Create job record
+	jobID, err := pkg.CreateJob(ctx, dynamoClient, []string{"ec2"}, len(req.Instances))
+	if err != nil {
+		log.Printf("failed to create job: %v", err)
 		return events.APIGatewayV2HTTPResponse{
 			StatusCode: 500,
-			Body: fmt.Sprintf(`{"error":"failed to process any instances","details":%s}`,
-				mustMarshalJSON(processingErrors)),
+			Body:       fmt.Sprintf(`{"error":"failed to create job: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Queue instances for processing
+	for i, instance := range req.Instances {
+		err := pkg.QueueWorkItem(ctx, sqsClient, jobID, i, "ec2", instance)
+		if err != nil {
+			log.Printf("failed to queue instance %s: %v", instance.InstanceID, err)
+			// Continue with other instances even if one fails
+		}
+	}
+
+	// Update job status to processing
+	err = pkg.UpdateJobStatus(ctx, dynamoClient, jobID, pkg.JobStatusProcessing)
+	if err != nil {
+		log.Printf("failed to update job status: %v", err)
+		// Continue anyway, not critical
+	}
+
+	// Return job ID to client
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: 202, // Accepted
+		Body:       fmt.Sprintf(`{"job_id":"%s","status":"processing","total_items":%d}`, jobID, len(req.Instances)),
+		Headers:    map[string]string{"Content-Type": "application/json"},
+	}, nil
+}
+
+// HandleJobStatus handles GET /jobs/{id} requests
+// HandleJobStatus handles GET /jobs/{id} requests - function in cmd/main.go
+func HandleJobStatus(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	jobID := apiReq.PathParameters["id"]
+	if jobID == "" {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 400,
+			Body:       `{"error":"missing job ID"}`,
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Load AWS config
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to initialize AWS client: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Create DynamoDB client
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	// Get job info
+	job, err := pkg.GetJob(ctx, dynamoClient, jobID)
+	if err != nil {
+		if err.Error() == "job not found" {
+			return events.APIGatewayV2HTTPResponse{
+				StatusCode: 404,
+				Body:       `{"error":"job not found"}`,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+			}, nil
+		}
+
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to get job: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// If job is still processing, return progress
+	if job.Status != pkg.JobStatusCompleted && job.Status != pkg.JobStatusFailed {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 202, // Accepted
+			Body: fmt.Sprintf(
+				`{"job_id":"%s","status":"%s","total_items":%d,"completed_items":%d,"failed_items":%d}`,
+				job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems,
+			),
 			Headers: map[string]string{"Content-Type": "application/json"},
 		}, nil
 	}
 
-	// Construct response with proper error handling
-	respData := map[string]interface{}{
-		"report": report,
-	}
-
-	// Add errors if any occurred
-	if len(processingErrors) > 0 {
-		respData["warnings"] = processingErrors
-	}
-
-	respBody, err := json.Marshal(respData)
+	// Job completed or failed, return full result
+	resultsJSON, err := json.Marshal(job.Results)
 	if err != nil {
-		log.Printf("failed to marshal response: %v", err)
 		return events.APIGatewayV2HTTPResponse{
 			StatusCode: 500,
-			Body:       `{"error":"internal server error - failed to construct response"}`,
+			Body:       fmt.Sprintf(`{"error":"failed to marshal results: %v"}`, err),
 			Headers:    map[string]string{"Content-Type": "application/json"},
 		}, nil
 	}
 
 	return events.APIGatewayV2HTTPResponse{
-		StatusCode:      200,
-		Headers:         map[string]string{"Content-Type": "application/json"},
-		Body:            string(respBody),
-		IsBase64Encoded: false,
+		StatusCode: 200,
+		Body: fmt.Sprintf(
+			`{"job_id":"%s","status":"%s","total_items":%d,"completed_items":%d,"failed_items":%d,"results":%s}`,
+			job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems, string(resultsJSON),
+		),
+		Headers: map[string]string{"Content-Type": "application/json"},
 	}, nil
-}
-
-// Helper function to ensure JSON marshaling doesn't fail
-func mustMarshalJSON(v interface{}) string {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprintf(`"[marshaling error: %s]"`, err)
-	}
-	return string(data)
 }
 
 func main() {
