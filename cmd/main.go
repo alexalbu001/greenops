@@ -15,19 +15,12 @@ import (
 	pkg "github.com/alexalbu001/greenops/pkg"
 )
 
-// ServerRequest represents incoming payload of instances to analyze
+// ServerRequest represents incoming payload of resources to analyze
 type ServerRequest struct {
 	Instances []pkg.Instance `json:"instances"`
+	S3Buckets []pkg.S3Bucket `json:"s3_buckets"`
 }
 
-// ReportItem for a single instance
-type ReportItem struct {
-	Instance  pkg.Instance `json:"instance"`
-	Embedding []float64    `json:"embedding"`
-	Analysis  string       `json:"analysis"`
-}
-
-// Handler is the Lambda entrypoint
 // Handler is the Lambda entrypoint
 func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	log.Printf("Received event: %s", apiReq.RawPath)
@@ -37,7 +30,7 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 		return HandleJobStatus(ctx, apiReq)
 	}
 
-	// New route: direct results access by job ID
+	// Check if this is a job results request
 	if apiReq.RouteKey == "GET /jobs/{id}/results" {
 		return HandleJobResults(ctx, apiReq)
 	}
@@ -56,11 +49,12 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 	}
 
 	// Validate request
-	if len(req.Instances) == 0 {
-		log.Printf("request contained no instances to analyze")
+	totalResources := len(req.Instances) + len(req.S3Buckets)
+	if totalResources == 0 {
+		log.Printf("request contained no resources to analyze")
 		return events.APIGatewayV2HTTPResponse{
 			StatusCode: 400,
-			Body:       `{"error":"no instances provided in request"}`,
+			Body:       `{"error":"no resources provided in request"}`,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 		}, nil
 	}
@@ -80,8 +74,16 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 	dynamoClient := dynamodb.NewFromConfig(cfg)
 	sqsClient := sqs.NewFromConfig(cfg)
 
-	// Create job record
-	jobID, err := pkg.CreateJob(ctx, dynamoClient, []string{"ec2"}, len(req.Instances))
+	// Create job record with resource types
+	resourceTypes := []string{}
+	if len(req.Instances) > 0 {
+		resourceTypes = append(resourceTypes, "ec2")
+	}
+	if len(req.S3Buckets) > 0 {
+		resourceTypes = append(resourceTypes, "s3")
+	}
+
+	jobID, err := pkg.CreateJob(ctx, dynamoClient, resourceTypes, totalResources)
 	if err != nil {
 		log.Printf("failed to create job: %v", err)
 		return events.APIGatewayV2HTTPResponse{
@@ -92,11 +94,38 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 	}
 
 	// Queue instances for processing
+	itemIndex := 0
+
+	// Queue EC2 instances
 	for i, instance := range req.Instances {
-		err := pkg.QueueWorkItem(ctx, sqsClient, jobID, i, "ec2", instance)
+		workItem := pkg.WorkItem{
+			JobID:     jobID,
+			ItemIndex: itemIndex + i,
+			ItemType:  "ec2",
+			Instance:  instance,
+		}
+
+		err := pkg.QueueWorkItem(ctx, sqsClient, jobID, itemIndex+i, "ec2", workItem)
 		if err != nil {
 			log.Printf("failed to queue instance %s: %v", instance.InstanceID, err)
-			// Continue with other instances even if one fails
+			// Continue with other resources even if one fails
+		}
+	}
+	itemIndex += len(req.Instances)
+
+	// Queue S3 buckets
+	for i, bucket := range req.S3Buckets {
+		workItem := pkg.WorkItem{
+			JobID:     jobID,
+			ItemIndex: itemIndex + i,
+			ItemType:  "s3",
+			S3Bucket:  bucket,
+		}
+
+		err := pkg.QueueWorkItem(ctx, sqsClient, jobID, itemIndex+i, "s3", workItem)
+		if err != nil {
+			log.Printf("failed to queue bucket %s: %v", bucket.BucketName, err)
+			// Continue with other resources even if one fails
 		}
 	}
 
@@ -110,70 +139,7 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 	// Return job ID to client
 	return events.APIGatewayV2HTTPResponse{
 		StatusCode: 202, // Accepted
-		Body:       fmt.Sprintf(`{"job_id":"%s","status":"processing","total_items":%d}`, jobID, len(req.Instances)),
-		Headers:    map[string]string{"Content-Type": "application/json"},
-	}, nil
-}
-
-// New function to handle direct results access
-func HandleJobResults(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	jobID := apiReq.PathParameters["id"]
-	if jobID == "" {
-		return events.APIGatewayV2HTTPResponse{
-			StatusCode: 400,
-			Body:       `{"error":"missing job ID"}`,
-			Headers:    map[string]string{"Content-Type": "application/json"},
-		}, nil
-	}
-
-	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return events.APIGatewayV2HTTPResponse{
-			StatusCode: 500,
-			Body:       fmt.Sprintf(`{"error":"failed to initialize AWS client: %v"}`, err),
-			Headers:    map[string]string{"Content-Type": "application/json"},
-		}, nil
-	}
-
-	// Create DynamoDB client
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-
-	// Get job directly from DynamoDB
-	log.Printf("Getting results for job %s", jobID)
-	job, err := pkg.GetJob(ctx, dynamoClient, jobID)
-	if err != nil {
-		if err.Error() == "job not found" {
-			return events.APIGatewayV2HTTPResponse{
-				StatusCode: 404,
-				Body:       `{"error":"job not found"}`,
-				Headers:    map[string]string{"Content-Type": "application/json"},
-			}, nil
-		}
-
-		return events.APIGatewayV2HTTPResponse{
-			StatusCode: 500,
-			Body:       fmt.Sprintf(`{"error":"failed to get job: %v"}`, err),
-			Headers:    map[string]string{"Content-Type": "application/json"},
-		}, nil
-	}
-
-	// Return just the results array, even if job is not completed
-	resultsJSON, err := json.Marshal(job.Results)
-	if err != nil {
-		return events.APIGatewayV2HTTPResponse{
-			StatusCode: 500,
-			Body:       fmt.Sprintf(`{"error":"failed to marshal results: %v"}`, err),
-			Headers:    map[string]string{"Content-Type": "application/json"},
-		}, nil
-	}
-
-	// Log the number of results for debugging
-	log.Printf("Returning %d results for job %s", len(job.Results), jobID)
-
-	return events.APIGatewayV2HTTPResponse{
-		StatusCode: 200,
-		Body:       fmt.Sprintf(`{"results":%s}`, string(resultsJSON)),
+		Body:       fmt.Sprintf(`{"job_id":"%s","status":"processing","total_items":%d}`, jobID, totalResources),
 		Headers:    map[string]string{"Content-Type": "application/json"},
 	}, nil
 }
@@ -300,6 +266,69 @@ func HandleJobStatus(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest)
 			job.JobID, job.Status, job.TotalItems, job.CompletedItems, job.FailedItems,
 		),
 		Headers: map[string]string{"Content-Type": "application/json"},
+	}, nil
+}
+
+// New function to handle direct results access
+func HandleJobResults(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	jobID := apiReq.PathParameters["id"]
+	if jobID == "" {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 400,
+			Body:       `{"error":"missing job ID"}`,
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Load AWS config
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to initialize AWS client: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Create DynamoDB client
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	// Get job directly from DynamoDB
+	log.Printf("Getting results for job %s", jobID)
+	job, err := pkg.GetJob(ctx, dynamoClient, jobID)
+	if err != nil {
+		if err.Error() == "job not found" {
+			return events.APIGatewayV2HTTPResponse{
+				StatusCode: 404,
+				Body:       `{"error":"job not found"}`,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+			}, nil
+		}
+
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to get job: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Return just the results array, even if job is not completed
+	resultsJSON, err := json.Marshal(job.Results)
+	if err != nil {
+		return events.APIGatewayV2HTTPResponse{
+			StatusCode: 500,
+			Body:       fmt.Sprintf(`{"error":"failed to marshal results: %v"}`, err),
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}, nil
+	}
+
+	// Log the number of results for debugging
+	log.Printf("Returning %d results for job %s", len(job.Results), jobID)
+
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: 200,
+		Body:       fmt.Sprintf(`{"results":%s}`, string(resultsJSON)),
+		Headers:    map[string]string{"Content-Type": "application/json"},
 	}, nil
 }
 

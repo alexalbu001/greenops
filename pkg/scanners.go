@@ -27,17 +27,53 @@ type EC2Scanner struct {
 	EC2Client *ec2.Client
 	CWClient  *cloudwatch.Client
 	DaysBack  int
+	MaxItems  int
 }
 
 // Scan implements ResourceScanner interface
 func (s *EC2Scanner) Scan(ctx context.Context) (interface{}, error) {
 	log.Printf("Scanning EC2 instances (past %d days)...", s.DaysBack)
-	return ListInstances(ctx, s.EC2Client, s.CWClient)
+	instances, err := ListInstances(ctx, s.EC2Client, s.CWClient)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply limit if specified
+	if s.MaxItems > 0 && len(instances) > s.MaxItems {
+		log.Printf("Limiting EC2 scan to %d instances (found %d)", s.MaxItems, len(instances))
+		instances = instances[:s.MaxItems]
+	}
+
+	return instances, nil
 }
 
 // Name implements ResourceScanner interface
 func (s *EC2Scanner) Name() string {
 	return "ec2"
+}
+
+// S3Scanner scans S3 buckets
+type S3Scanner struct {
+	S3Client *s3.Client
+	CWClient *cloudwatch.Client
+	MaxItems int
+}
+
+// Scan implements ResourceScanner interface
+func (s *S3Scanner) Scan(ctx context.Context) (interface{}, error) {
+	log.Printf("Scanning S3 buckets...")
+	buckets, err := ListBuckets(ctx, s.S3Client, s.CWClient, s.MaxItems)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("S3 scan completed: found %d buckets", len(buckets))
+	return buckets, nil
+}
+
+// Name implements ResourceScanner interface
+func (s *S3Scanner) Name() string {
+	return "s3"
 }
 
 // EBSScanner scans EBS volumes (placeholder for future implementation)
@@ -76,26 +112,8 @@ func (s *RDSScanner) Name() string {
 	return "rds"
 }
 
-// S3Scanner scans S3 buckets (placeholder for future implementation)
-type S3Scanner struct {
-	S3Client *s3.Client
-	CWClient *cloudwatch.Client
-	DaysBack int
-}
-
-// Scan implements ResourceScanner interface
-func (s *S3Scanner) Scan(ctx context.Context) (interface{}, error) {
-	log.Println("S3 bucket scanning not yet implemented")
-	return nil, fmt.Errorf("S3 scanning not implemented")
-}
-
-// Name implements ResourceScanner interface
-func (s *S3Scanner) Name() string {
-	return "s3"
-}
-
 // ScanResources scans multiple resource types in parallel
-func ScanResources(ctx context.Context, cfg aws.Config, resourceTypes []string, daysBack int) (map[string]interface{}, error) {
+func ScanResources(ctx context.Context, cfg aws.Config, resourceTypes []string, maxItems int, daysBack int) (map[string]interface{}, error) {
 	results := make(map[string]interface{})
 
 	// Early return if no resource types specified
@@ -115,6 +133,7 @@ func ScanResources(ctx context.Context, cfg aws.Config, resourceTypes []string, 
 			EC2Client: ec2Client,
 			CWClient:  cwClient,
 			DaysBack:  daysBack,
+			MaxItems:  maxItems,
 		},
 		"ebs": &EBSScanner{
 			EC2Client: ec2Client,
@@ -129,7 +148,7 @@ func ScanResources(ctx context.Context, cfg aws.Config, resourceTypes []string, 
 		"s3": &S3Scanner{
 			S3Client: s3Client,
 			CWClient: cwClient,
-			DaysBack: daysBack,
+			MaxItems: maxItems,
 		},
 	}
 
@@ -159,7 +178,7 @@ func ScanResources(ctx context.Context, cfg aws.Config, resourceTypes []string, 
 			defer wg.Done()
 
 			// Create timeout context for this scan
-			scanCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
 
 			// Run the scan

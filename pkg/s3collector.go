@@ -98,13 +98,7 @@ func ListBuckets(
 }
 
 // collectBucketData gathers all relevant data for a single bucket
-func collectBucketData(
-	ctx context.Context,
-	s3Client *s3.Client,
-	cwClient *cloudwatch.Client,
-	bucketName string,
-	creationDate *time.Time,
-) (S3Bucket, error) {
+func collectBucketData(ctx context.Context, s3Client *s3.Client, cwClient *cloudwatch.Client, bucketName string, creationDate *time.Time) (S3Bucket, error) {
 	bucket := S3Bucket{
 		BucketName:      bucketName,
 		StorageClasses:  make(map[string]int64),
@@ -116,29 +110,43 @@ func collectBucketData(
 		bucket.CreationDate = *creationDate
 	}
 
-	// Get bucket region
+	// Get bucket region first
 	region, err := getBucketRegion(ctx, s3Client, bucketName)
 	if err != nil {
 		log.Printf("Warning: Unable to determine region for bucket %s: %v", bucketName, err)
 	}
 	bucket.Region = region
 
-	// Get bucket tags
-	tags, err := getBucketTags(ctx, s3Client, bucketName)
+	// Create a region-specific client for this bucket
+	var bucketClient *s3.Client
+	if region != "" && region != s3Client.Options().Region {
+		// Create a new client with the bucket's region
+		cfg := s3Client.Options().Copy()
+		cfg.Region = region
+		bucketClient = s3.NewFromConfig(aws.Config{
+			Region:      region,
+			Credentials: cfg.Credentials,
+			HTTPClient:  cfg.HTTPClient,
+		})
+		log.Printf("Created region-specific S3 client for bucket %s (region: %s)", bucketName, region)
+	} else {
+		bucketClient = s3Client
+	}
+
+	// Use bucketClient instead of s3Client for all subsequent operations
+	tags, err := getBucketTags(ctx, bucketClient, bucketName)
 	if err != nil {
 		log.Printf("Warning: Unable to get tags for bucket %s: %v", bucketName, err)
 	}
 	bucket.Tags = tags
 
-	// Get lifecycle rules
-	lifecycleRules, err := getBucketLifecycleRules(ctx, s3Client, bucketName)
+	lifecycleRules, err := getBucketLifecycleRules(ctx, bucketClient, bucketName)
 	if err != nil {
 		log.Printf("Warning: Unable to get lifecycle rules for bucket %s: %v", bucketName, err)
 	}
 	bucket.LifecycleRules = lifecycleRules
 
-	// Get storage metrics
-	size, objectCount, storageClasses, lastModified, err := getBucketStorageMetrics(ctx, s3Client, bucketName)
+	size, objectCount, storageClasses, lastModified, err := getBucketStorageMetrics(ctx, bucketClient, bucketName)
 	if err != nil {
 		log.Printf("Warning: Unable to get storage metrics for bucket %s: %v", bucketName, err)
 	}
@@ -147,7 +155,6 @@ func collectBucketData(
 	bucket.StorageClasses = storageClasses
 	bucket.LastModified = lastModified
 
-	// Get access frequency metrics
 	accessMetrics, err := getBucketAccessMetrics(ctx, cwClient, bucketName)
 	if err != nil {
 		log.Printf("Warning: Unable to get access metrics for bucket %s: %v", bucketName, err)
@@ -227,8 +234,8 @@ func getBucketLifecycleRules(ctx context.Context, client *s3.Client, bucketName 
 			// Find the earliest transition
 			minDays := 999999
 			for _, transition := range rule.Transitions {
-				if transition.Days > 0 && int(transition.Days) < minDays {
-					minDays = int(transition.Days)
+				if transition.Days != nil && int(*transition.Days) < minDays {
+					minDays = int(*transition.Days)
 				}
 			}
 
@@ -238,12 +245,12 @@ func getBucketLifecycleRules(ctx context.Context, client *s3.Client, bucketName 
 		}
 
 		// Check for expirations
-		if rule.Expiration != nil && rule.Expiration.Days > 0 {
+		if rule.Expiration != nil && rule.Expiration.Days != nil {
 			ruleInfo.HasExpirations = true
 
 			// If no transitions or expiration comes first, use it for threshold
-			if !ruleInfo.HasTransitions || int(rule.Expiration.Days) < ruleInfo.ObjectAgeThreshold {
-				ruleInfo.ObjectAgeThreshold = int(rule.Expiration.Days)
+			if !ruleInfo.HasTransitions || int(*rule.Expiration.Days) < ruleInfo.ObjectAgeThreshold {
+				ruleInfo.ObjectAgeThreshold = int(*rule.Expiration.Days)
 			}
 		}
 
@@ -273,7 +280,7 @@ func getBucketStorageMetrics(ctx context.Context, client *s3.Client, bucketName 
 	for {
 		listParams := &s3.ListObjectsV2Input{
 			Bucket:            aws.String(bucketName),
-			MaxKeys:           maxKeys,
+			MaxKeys:           &maxKeys,
 			ContinuationToken: continuationToken,
 		}
 
@@ -284,7 +291,6 @@ func getBucketStorageMetrics(ctx context.Context, client *s3.Client, bucketName 
 
 		// Process objects
 		for _, obj := range listResult.Contents {
-			size += obj.Size
 			objectCount++
 
 			// Track storage classes
@@ -292,7 +298,15 @@ func getBucketStorageMetrics(ctx context.Context, client *s3.Client, bucketName 
 			if storageClass == "" {
 				storageClass = "STANDARD" // Default storage class
 			}
-			storageClasses[storageClass] += obj.Size
+
+			// Add size to totals - handle pointer properly
+			objSize := int64(0)
+			if obj.Size != nil {
+				objSize = *obj.Size
+			}
+
+			size += objSize
+			storageClasses[storageClass] += objSize
 
 			// Track the most recent object modification
 			if obj.LastModified != nil && obj.LastModified.After(lastModified) {
@@ -303,7 +317,7 @@ func getBucketStorageMetrics(ctx context.Context, client *s3.Client, bucketName 
 		sampleSize += len(listResult.Contents)
 
 		// If we've sampled enough objects or there are no more, break
-		if !listResult.IsTruncated || sampleSize >= 5000 {
+		if listResult.IsTruncated == nil || !(*listResult.IsTruncated) || sampleSize >= 5000 {
 			break
 		}
 

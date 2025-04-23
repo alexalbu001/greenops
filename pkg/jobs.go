@@ -50,6 +50,7 @@ type WorkItem struct {
 	ItemIndex int      `json:"item_index"`
 	ItemType  string   `json:"item_type"`
 	Instance  Instance `json:"instance,omitempty"`
+	S3Bucket  S3Bucket `json:"s3_bucket,omitempty"`
 	// Add other resource types here later (S3, RDS, etc.)
 }
 
@@ -93,13 +94,11 @@ func CreateJob(ctx context.Context, dynamoClient *dynamodb.Client, resourceTypes
 }
 
 // QueueWorkItem adds a work item to the SQS queue
-func QueueWorkItem(ctx context.Context, sqsClient *sqs.Client, jobID string, itemIndex int, itemType string, instance Instance) error {
-	workItem := WorkItem{
-		JobID:     jobID,
-		ItemIndex: itemIndex,
-		ItemType:  itemType,
-		Instance:  instance,
-	}
+func QueueWorkItem(ctx context.Context, sqsClient *sqs.Client, jobID string, itemIndex int, itemType string, workItem WorkItem) error {
+	// Set the job ID and other metadata
+	workItem.JobID = jobID
+	workItem.ItemIndex = itemIndex
+	workItem.ItemType = itemType
 
 	body, err := json.Marshal(workItem)
 	if err != nil {
@@ -154,8 +153,10 @@ func UpdateJobStatus(ctx context.Context, dynamoClient *dynamodb.Client, jobID s
 	return nil
 }
 
-// GetJob retrieves a job from DynamoDB
+// GetJob retrieves a job from DynamoDB with robust string handling
 func GetJob(ctx context.Context, dynamoClient *dynamodb.Client, jobID string) (*JobInfo, error) {
+	log.Printf("Retrieving job %s from DynamoDB", jobID)
+
 	result, err := dynamoClient.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(os.Getenv("JOBS_TABLE")),
 		Key: map[string]types.AttributeValue{
@@ -171,81 +172,169 @@ func GetJob(ctx context.Context, dynamoClient *dynamodb.Client, jobID string) (*
 		return nil, fmt.Errorf("job not found")
 	}
 
+	// First extract the basic job information (without the results)
+	removeResults := copyDynamoItemWithoutResults(result.Item)
+
 	var job JobInfo
-	err = attributevalue.UnmarshalMap(result.Item, &job)
+	err = attributevalue.UnmarshalMap(removeResults, &job)
 	if err != nil {
-		log.Printf("Standard unmarshal failed: %v. Trying alternative approach...", err)
+		return nil, fmt.Errorf("failed to unmarshal job basic info: %w", err)
+	}
 
-		// Create a map to store the raw data first
-		rawJob := make(map[string]interface{})
-		err2 := attributevalue.UnmarshalMap(result.Item, &rawJob)
-		if err2 != nil {
-			return nil, fmt.Errorf("failed to unmarshal job (both methods): %w", err2)
-		}
+	// Now handle results separately
+	if resultsAV, hasResults := result.Item["results"]; hasResults {
+		log.Printf("Found results field in job %s, processing separately", jobID)
 
-		// Extract basic fields manually
-		job.JobID = getStringValue(rawJob, "job_id")
-		job.Status = JobStatus(getStringValue(rawJob, "status"))
-		job.CreatedAt = getInt64Value(rawJob, "created_at")
-		job.UpdatedAt = getInt64Value(rawJob, "updated_at")
-		job.CompletedAt = getInt64Value(rawJob, "completed_at")
-		job.TotalItems = getIntValue(rawJob, "total_items")
-		job.CompletedItems = getIntValue(rawJob, "completed_items")
-		job.FailedItems = getIntValue(rawJob, "failed_items")
-		job.ExpirationTime = getInt64Value(rawJob, "expiration_time")
+		switch typedResults := resultsAV.(type) {
+		case *types.AttributeValueMemberL:
+			job.Results = make([]ReportItem, 0)
 
-		// Handle resource types array
-		if resourceTypes, ok := rawJob["resource_types"].([]interface{}); ok {
-			for _, rt := range resourceTypes {
-				if rtString, ok := rt.(string); ok {
-					job.ResourceTypes = append(job.ResourceTypes, rtString)
+			for i, resultItemAV := range typedResults.Value {
+				reportItem, err := extractReportItem(resultItemAV, i)
+				if err != nil {
+					log.Printf("Warning: Failed to extract report item %d: %v", i, err)
+					continue
 				}
+
+				job.Results = append(job.Results, reportItem)
 			}
+
+			log.Printf("Successfully extracted %d report items for job %s", len(job.Results), jobID)
+
+		default:
+			log.Printf("Warning: Results field is not a list, found type %T instead", resultsAV)
 		}
-
-		// FIXED: Handle results field, which might contain string-encoded JSON
-		if resultsRaw, exists := result.Item["results"]; exists {
-			if resultsList, ok := resultsRaw.(*types.AttributeValueMemberL); ok {
-				job.Results = make([]ReportItem, 0, len(resultsList.Value))
-
-				for _, itemRaw := range resultsList.Value {
-					var reportItem ReportItem
-
-					switch v := itemRaw.(type) {
-					case *types.AttributeValueMemberM:
-						// If it's a proper DynamoDB map, unmarshal it directly
-						if err := attributevalue.UnmarshalMap(v.Value, &reportItem); err == nil {
-							job.Results = append(job.Results, reportItem)
-						} else {
-							log.Printf("Warning: Failed to unmarshal map result: %v", err)
-						}
-
-					case *types.AttributeValueMemberS:
-						// If it's a string (JSON-encoded), parse it
-						var reportItemStr string
-						attributevalue.Unmarshal(v, &reportItemStr)
-
-						// First try unmarshaling the string directly to a ReportItem
-						if err := json.Unmarshal([]byte(reportItemStr), &reportItem); err == nil {
-							job.Results = append(job.Results, reportItem)
-						} else {
-							log.Printf("Warning: Failed to unmarshal string result: %v", err)
-
-							// If that fails, try to clean up the string (handle escaped quotes)
-							cleanJSON := strings.ReplaceAll(reportItemStr, "\\\"", "\"")
-							if err := json.Unmarshal([]byte(cleanJSON), &reportItem); err == nil {
-								job.Results = append(job.Results, reportItem)
-							} else {
-								log.Printf("Warning: Failed to unmarshal cleaned string result: %v", err)
-							}
-						}
-					}
-				}
-			}
-		}
+	} else {
+		log.Printf("No results field found for job %s", jobID)
+		job.Results = []ReportItem{}
 	}
 
 	return &job, nil
+}
+
+// extractReportItem extracts a ReportItem from a DynamoDB attribute value
+func extractReportItem(av types.AttributeValue, index int) (ReportItem, error) {
+	var reportItem ReportItem
+
+	switch typedAV := av.(type) {
+	case *types.AttributeValueMemberM:
+		// If it's a map, try standard unmarshaling
+		if err := attributevalue.UnmarshalMap(typedAV.Value, &reportItem); err != nil {
+			return reportItem, err
+		}
+
+	case *types.AttributeValueMemberS:
+		// If it's a string, try various approaches to parse it
+		log.Printf("Found string-formatted report item at index %d", index)
+
+		var stringValue string
+		if err := attributevalue.Unmarshal(typedAV, &stringValue); err != nil {
+			return reportItem, err
+		}
+
+		// Try direct JSON unmarshaling
+		if err := json.Unmarshal([]byte(stringValue), &reportItem); err != nil {
+			log.Printf("Failed direct unmarshal, trying unescape: %v", err)
+
+			// Try unescaping quotes
+			cleanJSON := strings.ReplaceAll(stringValue, "\\\"", "\"")
+			if err := json.Unmarshal([]byte(cleanJSON), &reportItem); err != nil {
+				log.Printf("Failed cleanup unmarshal, trying parse instance directly: %v", err)
+
+				// Last resort - try to manually extract and parse components
+				return parseManually(stringValue)
+			}
+		}
+
+	default:
+		return reportItem, fmt.Errorf("unsupported attribute value type: %T", av)
+	}
+
+	return reportItem, nil
+}
+
+// parseManually tries to manually extract data from a string representation
+func parseManually(jsonStr string) (ReportItem, error) {
+	var reportItem ReportItem
+
+	// Check if it's an EC2 instance or S3 bucket based on field names
+	if strings.Contains(jsonStr, "instanceId") {
+		// Parse as EC2 instance
+		var data struct {
+			Instance  map[string]interface{} `json:"instance"`
+			Embedding []float64              `json:"embedding"`
+			Analysis  string                 `json:"analysis"`
+		}
+
+		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			// Try with some cleanup
+			cleanJSON := strings.ReplaceAll(jsonStr, "\\\"", "\"")
+			cleanJSON = strings.ReplaceAll(cleanJSON, "\"\"", "\"")
+			if err := json.Unmarshal([]byte(cleanJSON), &data); err != nil {
+				return reportItem, fmt.Errorf("failed to manually parse EC2 data: %w", err)
+			}
+		}
+
+		// Recreate the instance
+		instanceData, err := json.Marshal(data.Instance)
+		if err != nil {
+			return reportItem, err
+		}
+
+		err = json.Unmarshal(instanceData, &reportItem.Instance)
+		if err != nil {
+			return reportItem, err
+		}
+
+		reportItem.Embedding = data.Embedding
+		reportItem.Analysis = data.Analysis
+
+	} else if strings.Contains(jsonStr, "bucketName") {
+		// Parse as S3 bucket
+		var data struct {
+			S3Bucket  map[string]interface{} `json:"s3_bucket"`
+			Embedding []float64              `json:"embedding"`
+			Analysis  string                 `json:"analysis"`
+		}
+
+		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			// Try with some cleanup
+			cleanJSON := strings.ReplaceAll(jsonStr, "\\\"", "\"")
+			cleanJSON = strings.ReplaceAll(cleanJSON, "\"\"", "\"")
+			if err := json.Unmarshal([]byte(cleanJSON), &data); err != nil {
+				return reportItem, fmt.Errorf("failed to manually parse S3 data: %w", err)
+			}
+		}
+
+		// Recreate the bucket
+		bucketData, err := json.Marshal(data.S3Bucket)
+		if err != nil {
+			return reportItem, err
+		}
+
+		err = json.Unmarshal(bucketData, &reportItem.S3Bucket)
+		if err != nil {
+			return reportItem, err
+		}
+
+		reportItem.Embedding = data.Embedding
+		reportItem.Analysis = data.Analysis
+	} else {
+		return reportItem, fmt.Errorf("unable to determine resource type from string: %s", jsonStr)
+	}
+
+	return reportItem, nil
+}
+
+// copyDynamoItemWithoutResults creates a copy of a DynamoDB item without the 'results' field
+func copyDynamoItemWithoutResults(item map[string]types.AttributeValue) map[string]types.AttributeValue {
+	newItem := make(map[string]types.AttributeValue, len(item)-1)
+	for k, v := range item {
+		if k != "results" {
+			newItem[k] = v
+		}
+	}
+	return newItem
 }
 
 // Helper functions to safely extract values from a map
@@ -299,41 +388,34 @@ func UpdateJobProgress(ctx context.Context, dynamoClient *dynamodb.Client, jobID
 	now := time.Now().Unix()
 
 	if success {
-		// For successful completion with results, use a more explicit update
+		// Base update expression and values (only increment and timestamp)
 		updateExpr := "SET updated_at = :updated_at, completed_items = completed_items + :inc"
 		exprValues := map[string]types.AttributeValue{
 			":updated_at": &types.AttributeValueMemberN{Value: strconv.FormatInt(now, 10)},
 			":inc":        &types.AttributeValueMemberN{Value: "1"},
-			":empty_list": &types.AttributeValueMemberL{Value: []types.AttributeValue{}},
 		}
 
-		// Only add the result if it's not empty
-		if !IsEmpty(result) {
-			// First, get the current job to see if results already exists
+		// Only append a ReportItem if it's non-empty
+		if !IsEmptyObject(result) {
+			// Check whether the "results" list already exists
 			getResult, err := dynamoClient.GetItem(ctx, &dynamodb.GetItemInput{
-				TableName: aws.String(os.Getenv("JOBS_TABLE")),
-				Key: map[string]types.AttributeValue{
-					"job_id": &types.AttributeValueMemberS{Value: jobID},
-				},
+				TableName:            aws.String(os.Getenv("JOBS_TABLE")),
+				Key:                  map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: jobID}},
 				ProjectionExpression: aws.String("results"),
 			})
-
 			if err != nil {
 				log.Printf("Warning: Failed to check current results: %v", err)
 			}
 
-			// Marshal the result to a DynamoDB attribute MAP (not a string like before!)
+			// Marshal the new ReportItem
 			resultAV, err := attributevalue.MarshalMap(result)
 			if err != nil {
-				log.Printf("Warning: Failed to marshal result to DynamoDB: %v", err)
-
-				// If marshaling fails, still update the completed count without adding the result
+				log.Printf("Warning: Failed to marshal result: %v", err)
+				// Fallback: update count only
 				_, err := dynamoClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-					TableName: aws.String(os.Getenv("JOBS_TABLE")),
-					Key: map[string]types.AttributeValue{
-						"job_id": &types.AttributeValueMemberS{Value: jobID},
-					},
-					UpdateExpression:          aws.String("SET updated_at = :updated_at, completed_items = completed_items + :inc"),
+					TableName:                 aws.String(os.Getenv("JOBS_TABLE")),
+					Key:                       map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: jobID}},
+					UpdateExpression:          aws.String(updateExpr),
 					ExpressionAttributeValues: exprValues,
 				})
 				if err != nil {
@@ -342,16 +424,15 @@ func UpdateJobProgress(ctx context.Context, dynamoClient *dynamodb.Client, jobID
 				return nil
 			}
 
-			// Check if the results field exists
-			if _, ok := getResult.Item["results"]; ok {
-				// Results field exists, append to it
+			// Determine whether to prepend an empty list or append to existing
+			if _, exists := getResult.Item["results"]; exists {
 				updateExpr += ", results = list_append(results, :result)"
 			} else {
-				// Results field doesn't exist, create it
 				updateExpr += ", results = list_append(:empty_list, :result)"
+				exprValues[":empty_list"] = &types.AttributeValueMemberL{Value: []types.AttributeValue{}}
 			}
 
-			// Add the result to the list as a MAP, not a string
+			// Add the new item
 			exprValues[":result"] = &types.AttributeValueMemberL{
 				Value: []types.AttributeValue{
 					&types.AttributeValueMemberM{Value: resultAV},
@@ -361,19 +442,17 @@ func UpdateJobProgress(ctx context.Context, dynamoClient *dynamodb.Client, jobID
 
 		// Perform the update
 		_, err := dynamoClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(os.Getenv("JOBS_TABLE")),
-			Key: map[string]types.AttributeValue{
-				"job_id": &types.AttributeValueMemberS{Value: jobID},
-			},
+			TableName:                 aws.String(os.Getenv("JOBS_TABLE")),
+			Key:                       map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: jobID}},
 			UpdateExpression:          aws.String(updateExpr),
 			ExpressionAttributeValues: exprValues,
 		})
-
 		if err != nil {
 			return fmt.Errorf("failed to update job progress: %w", err)
 		}
+
 	} else {
-		// For failed items, just increment the counter
+		// For failed items, just increment the failed counter
 		updateExpr := "SET updated_at = :updated_at, failed_items = failed_items + :inc"
 		exprValues := map[string]types.AttributeValue{
 			":updated_at": &types.AttributeValueMemberN{Value: strconv.FormatInt(now, 10)},
@@ -381,14 +460,11 @@ func UpdateJobProgress(ctx context.Context, dynamoClient *dynamodb.Client, jobID
 		}
 
 		_, err := dynamoClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(os.Getenv("JOBS_TABLE")),
-			Key: map[string]types.AttributeValue{
-				"job_id": &types.AttributeValueMemberS{Value: jobID},
-			},
+			TableName:                 aws.String(os.Getenv("JOBS_TABLE")),
+			Key:                       map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: jobID}},
 			UpdateExpression:          aws.String(updateExpr),
 			ExpressionAttributeValues: exprValues,
 		})
-
 		if err != nil {
 			return fmt.Errorf("failed to update job progress: %w", err)
 		}
@@ -397,8 +473,8 @@ func UpdateJobProgress(ctx context.Context, dynamoClient *dynamodb.Client, jobID
 	return nil
 }
 
-// IsEmpty checks if a struct is empty
-func IsEmpty(obj interface{}) bool {
+// IsEmptyObject checks if a struct is empty
+func IsEmptyObject(obj interface{}) bool {
 	// Simple check - this would need to be more robust in production
 	jsonData, err := json.Marshal(obj)
 	if err != nil {

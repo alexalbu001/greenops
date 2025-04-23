@@ -188,6 +188,13 @@ resource "aws_apigatewayv2_route" "analyze_route" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda_integ.id}"
 }
 
+resource "aws_apigatewayv2_route" "job_results_route" {
+  api_id    = aws_apigatewayv2_api.http_api.id
+  route_key = "GET /jobs/{id}/results"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda_integ.id}"
+}
+
+
 resource "aws_apigatewayv2_route" "job_status_route" {
   api_id    = aws_apigatewayv2_api.http_api.id
   route_key = "GET /jobs/{id}"

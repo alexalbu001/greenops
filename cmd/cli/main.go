@@ -15,8 +15,6 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
 
 	pkg "github.com/alexalbu001/greenops/pkg"
 )
@@ -101,6 +99,7 @@ func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, clien
 		baseURL = baseURL[:len(baseURL)-len("/analyze")]
 	}
 	jobURL := fmt.Sprintf("%s/jobs/%s", baseURL, jobID)
+	resultsURL := fmt.Sprintf("%s/jobs/%s/results", baseURL, jobID)
 
 	var lastCompletedItems int = 0
 	var noProgressCounter int = 0
@@ -124,33 +123,13 @@ func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, clien
 			return nil, fmt.Errorf("failed to read job status response: %v", err)
 		}
 
-		// Try to parse the full response first (works if job is completed)
-		var fullResult struct {
-			JobID          string           `json:"job_id"`
-			Status         string           `json:"status"`
-			TotalItems     int              `json:"total_items"`
-			CompletedItems int              `json:"completed_items"`
-			FailedItems    int              `json:"failed_items"`
-			Results        []pkg.ReportItem `json:"results"`
-		}
-
-		err = json.Unmarshal(body, &fullResult)
-
-		// Check if we already have completed status and results
-		if err == nil && (fullResult.Status == "completed" || fullResult.Status == "failed") && len(fullResult.Results) > 0 {
-			log.Printf("Job complete: %s - %d/%d items processed, %d failed",
-				fullResult.Status, fullResult.CompletedItems, fullResult.TotalItems, fullResult.FailedItems)
-			return fullResult.Results, nil
-		}
-
-		// If not completed or couldn't parse full result, parse basic status
+		// Parse the status response
 		var statusResp struct {
-			JobID          string          `json:"job_id"`
-			Status         string          `json:"status"`
-			TotalItems     int             `json:"total_items"`
-			CompletedItems int             `json:"completed_items"`
-			FailedItems    int             `json:"failed_items"`
-			Results        json.RawMessage `json:"results"`
+			JobID          string `json:"job_id"`
+			Status         string `json:"status"`
+			TotalItems     int    `json:"total_items"`
+			CompletedItems int    `json:"completed_items"`
+			FailedItems    int    `json:"failed_items"`
 		}
 
 		err = json.Unmarshal(body, &statusResp)
@@ -163,105 +142,74 @@ func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, clien
 		log.Printf("Job status: %s (%d/%d items processed, %d failed)",
 			statusResp.Status, statusResp.CompletedItems, statusResp.TotalItems, statusResp.FailedItems)
 
-		// See if we can parse results directly from the response
-		if statusResp.Results != nil && len(statusResp.Results) > 2 { // More than just '[]'
-			var reportItems []pkg.ReportItem
-			if err := json.Unmarshal(statusResp.Results, &reportItems); err == nil && len(reportItems) > 0 {
-				log.Printf("Successfully parsed %d report items from response", len(reportItems))
-				if statusResp.CompletedItems == statusResp.TotalItems ||
-					(statusResp.CompletedItems+statusResp.FailedItems >= statusResp.TotalItems) {
-					return reportItems, nil
-				}
+		// If job is completed or failed, get results
+		if statusResp.Status == "completed" || statusResp.Status == "failed" {
+			return getResultsDirectly(ctx, resultsURL, client)
+		}
+
+		// Check if all items are processed, even if status hasn't been updated yet
+		if statusResp.CompletedItems+statusResp.FailedItems >= statusResp.TotalItems {
+			noProgressCounter++
+
+			// If all items are processed but status hasn't changed for 3 consecutive polls,
+			// consider the job complete and get results directly
+			if noProgressCounter >= 3 {
+				log.Printf("All items processed but job status still '%s'. Getting results directly after %d polls with no status change.",
+					statusResp.Status, noProgressCounter)
+
+				return getResultsDirectly(ctx, resultsURL, client)
+			}
+		} else {
+			// Reset counter if we see progress
+			if statusResp.CompletedItems > lastCompletedItems {
+				lastCompletedItems = statusResp.CompletedItems
+				noProgressCounter = 0
 			}
 		}
 
-		// If the status is still "processing"
-		if statusResp.Status == "processing" {
-			// Check if all items are processed, even if status hasn't been updated yet
-			if statusResp.CompletedItems+statusResp.FailedItems >= statusResp.TotalItems {
-				noProgressCounter++
-
-				// If all items are processed but status hasn't changed for 3 consecutive polls,
-				// consider the job complete and force a return with the results
-				if noProgressCounter >= 3 {
-					log.Printf("All items processed but job status still '%s'. Forcing completion after %d polls with no status change.",
-						statusResp.Status, noProgressCounter)
-
-					// Make a specific call to get the full job details
-					// This is a more explicit call that should return complete data
-					req, err := http.NewRequestWithContext(ctx, "GET",
-						fmt.Sprintf("%s/jobs/%s?force_complete=true", baseURL, jobID), nil)
-					if err == nil {
-						forceResp, err := client.Do(req)
-						if err == nil && forceResp.StatusCode == http.StatusOK {
-							forceBody, err := io.ReadAll(forceResp.Body)
-							forceResp.Body.Close()
-							if err == nil {
-								var forceResult struct {
-									Results []pkg.ReportItem `json:"results"`
-								}
-
-								if err := json.Unmarshal(forceBody, &forceResult); err == nil && len(forceResult.Results) > 0 {
-									log.Printf("Successfully retrieved %d report items by force completion",
-										len(forceResult.Results))
-									return forceResult.Results, nil
-								}
-							}
-						}
-					}
-
-					// If we get here, we couldn't get the results by forcing completion
-					// Just return an empty array rather than timing out
-					log.Printf("WARNING: Forced completion, but couldn't retrieve results. Returning empty result set.")
-					return []pkg.ReportItem{}, nil
-				}
-			} else {
-				// Reset counter if we see progress
-				if statusResp.CompletedItems > lastCompletedItems {
-					lastCompletedItems = statusResp.CompletedItems
-					noProgressCounter = 0
-				}
-			}
-
-			// Wait before next poll
-			time.Sleep(time.Duration(pollInterval) * time.Second)
-			continue
-		}
-
-		// Handle non-processing status that's not already handled above
-		if statusResp.Status != "processing" {
-			// For completed or failed status but without results in direct response
-			req, err := http.NewRequestWithContext(ctx, "GET", jobURL, nil)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create final results request: %v", err)
-			}
-
-			finalResp, err := client.Do(req)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get final results: %v", err)
-			}
-
-			finalBody, err := io.ReadAll(finalResp.Body)
-			finalResp.Body.Close()
-			if err != nil {
-				return nil, fmt.Errorf("failed to read final results response: %v", err)
-			}
-
-			// Try to get results from the response
-			var finalResult struct {
-				Results []pkg.ReportItem `json:"results"`
-			}
-			if err := json.Unmarshal(finalBody, &finalResult); err == nil && len(finalResult.Results) > 0 {
-				return finalResult.Results, nil
-			}
-
-			// If we still don't have results, return an empty array
-			log.Printf("WARNING: Job is %s but no results found. Returning empty result set.", statusResp.Status)
-			return []pkg.ReportItem{}, nil
-		}
+		// Wait before next poll
+		time.Sleep(time.Duration(pollInterval) * time.Second)
 	}
 
 	return nil, fmt.Errorf("maximum polling attempts reached - job may still be running")
+}
+
+// getResultsDirectly retrieves results from the direct results endpoint
+func getResultsDirectly(ctx context.Context, resultsURL string, client *http.Client) ([]pkg.ReportItem, error) {
+	log.Printf("Getting results directly from %s", resultsURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", resultsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create results request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get results: %v", err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read results response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("results API returned error status %d: %s", resp.StatusCode, body)
+	}
+
+	// Parse the response
+	var resultsResp struct {
+		Results []pkg.ReportItem `json:"results"`
+	}
+
+	err = json.Unmarshal(body, &resultsResp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse results: %v", err)
+	}
+
+	log.Printf("Successfully retrieved %d report items directly", len(resultsResp.Results))
+	return resultsResp.Results, nil
 }
 
 func main() {
@@ -288,7 +236,7 @@ func main() {
 		defaultConfig.API.URL = "https://8tse26l4fi.execute-api.eu-west-1.amazonaws.com/analyze"
 		defaultConfig.API.Timeout = 60
 		defaultConfig.Scan.Limit = 10
-		defaultConfig.Scan.Resources = []string{"ec2"}
+		defaultConfig.Scan.Resources = []string{"ec2", "s3"}
 		defaultConfig.Scan.Metrics.PeriodDays = 7
 		defaultConfig.Output.Colors = true
 		defaultConfig.Output.Format = "text"
@@ -346,7 +294,7 @@ func main() {
 		cfg.AWS.Region = region
 		cfg.AWS.Profile = profile
 		cfg.Scan.Limit = resourceCap
-		cfg.Scan.Resources = []string{"ec2"}
+		cfg.Scan.Resources = []string{"ec2", "s3"}
 		cfg.Scan.Metrics.PeriodDays = 7
 		cfg.Output.Colors = !noColor
 		cfg.Output.Format = "text"
@@ -390,207 +338,196 @@ func main() {
 		log.Fatalf("Failed to load AWS configuration: %v", err)
 	}
 
-	// Create AWS service clients
-	ec2Client := ec2.NewFromConfig(awsCfg)
-	cwClient := cloudwatch.NewFromConfig(awsCfg)
-
 	// Scan resources
-	if containsResource(cfg.Scan.Resources, "ec2") {
-		// Scan EC2 instances
-		log.Println("Scanning EC2 instances...")
-		instances, err := pkg.ListInstances(ctx, ec2Client, cwClient)
+	scanResults, err := pkg.ScanResources(ctx, awsCfg, cfg.Scan.Resources, cfg.Scan.Limit, cfg.Scan.Metrics.PeriodDays)
+	if err != nil {
+		log.Fatalf("Failed to scan resources: %v", err)
+	}
+
+	// Initialize request payload
+	requestPayload := map[string]interface{}{}
+	totalResourceCount := 0
+
+	// Process EC2 instances
+	if instances, ok := scanResults["ec2"].([]pkg.Instance); ok && len(instances) > 0 {
+		log.Printf("Found %d EC2 instances for analysis", len(instances))
+		requestPayload["instances"] = instances
+		totalResourceCount += len(instances)
+	}
+
+	// Process S3 buckets
+	if buckets, ok := scanResults["s3"].([]pkg.S3Bucket); ok && len(buckets) > 0 {
+		log.Printf("Found %d S3 buckets for analysis", len(buckets))
+		requestPayload["s3_buckets"] = buckets
+		totalResourceCount += len(buckets)
+	}
+
+	if totalResourceCount == 0 {
+		log.Println("No resources found to analyze.")
+		return
+	}
+
+	// Prepare request payload
+	requestBody, err := json.Marshal(requestPayload)
+	if err != nil {
+		log.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	// Create HTTP client
+	client := &http.Client{
+		Timeout: time.Duration(cfg.API.Timeout) * time.Second,
+	}
+	log.Printf("Using HTTP client with timeout: %s", client.Timeout)
+
+	// Process based on mode (sync or async)
+	if asyncMode {
+		log.Printf("Using asynchronous mode for processing %d resources...", totalResourceCount)
+
+		// Send async request
+		req, err := http.NewRequestWithContext(ctx, "POST", cfg.API.URL, bytes.NewBuffer(requestBody))
 		if err != nil {
-			log.Fatalf("Failed to scan EC2 instances: %v", err)
+			log.Fatalf("Failed to create HTTP request: %v", err)
 		}
+		req.Header.Set("Content-Type", "application/json")
 
-		// Apply resource cap limit
-		if len(instances) > cfg.Scan.Limit {
-			log.Printf("Limiting analysis to %d instances (found %d)", cfg.Scan.Limit, len(instances))
-			instances = instances[:cfg.Scan.Limit]
-		}
-
-		if len(instances) == 0 {
-			log.Println("No running EC2 instances found.")
-			return
-		}
-
-		// Prepare request payload
-		requestPayload := map[string]interface{}{
-			"instances": instances,
-		}
-		requestBody, err := json.Marshal(requestPayload)
+		// Send request
+		resp, err := client.Do(req)
 		if err != nil {
-			log.Fatalf("Failed to marshal request: %v", err)
+			log.Fatalf("Failed to send request: %v", err)
 		}
 
-		// Create HTTP client
-		client := &http.Client{
-			Timeout: time.Duration(cfg.API.Timeout) * time.Second,
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			log.Fatalf("Failed to read response: %v", err)
 		}
-		log.Printf("Using HTTP client with timeout: %s", client.Timeout)
 
-		// Process based on mode (sync or async)
-		if asyncMode {
-			log.Printf("Using asynchronous mode for processing %d instances...", len(instances))
+		if resp.StatusCode != http.StatusAccepted {
+			log.Fatalf("API returned error status %d: %s", resp.StatusCode, body)
+		}
 
-			// Send async request
-			req, err := http.NewRequestWithContext(ctx, "POST", cfg.API.URL, bytes.NewBuffer(requestBody))
+		// Parse job ID from response
+		var jobResponse struct {
+			JobID      string `json:"job_id"`
+			Status     string `json:"status"`
+			TotalItems int    `json:"total_items"`
+		}
+
+		err = json.Unmarshal(body, &jobResponse)
+		if err != nil {
+			log.Fatalf("Failed to parse job response: %v", err)
+		}
+
+		log.Printf("Job submitted: ID=%s, Status=%s, Items=%d",
+			jobResponse.JobID, jobResponse.Status, jobResponse.TotalItems)
+
+		// Poll for results
+		report, err := pollForJobResults(ctx, jobResponse.JobID, cfg, client)
+		if err != nil {
+			log.Fatalf("Failed to get job results: %v", err)
+		}
+
+		// Display results
+		if outputFile != "" {
+			// Write to file
+			file, err := os.Create(outputFile)
 			if err != nil {
-				log.Fatalf("Failed to create HTTP request: %v", err)
+				log.Fatalf("Failed to create output file: %v", err)
 			}
-			req.Header.Set("Content-Type", "application/json")
+			defer file.Close()
 
-			// Send request
-			resp, err := client.Do(req)
-			if err != nil {
-				log.Fatalf("Failed to send request: %v", err)
-			}
-
-			body, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				log.Fatalf("Failed to read response: %v", err)
-			}
-
-			if resp.StatusCode != http.StatusAccepted {
-				log.Fatalf("API returned error status %d: %s", resp.StatusCode, body)
-			}
-
-			// Parse job ID from response
-			var jobResponse struct {
-				JobID      string `json:"job_id"`
-				Status     string `json:"status"`
-				TotalItems int    `json:"total_items"`
-			}
-
-			err = json.Unmarshal(body, &jobResponse)
-			if err != nil {
-				log.Fatalf("Failed to parse job response: %v", err)
-			}
-
-			log.Printf("Job submitted: ID=%s, Status=%s, Items=%d",
-				jobResponse.JobID, jobResponse.Status, jobResponse.TotalItems)
-
-			// Poll for results
-			report, err := pollForJobResults(ctx, jobResponse.JobID, cfg, client)
-			if err != nil {
-				log.Fatalf("Failed to get job results: %v", err)
-			}
-
-			// Display results
-			if outputFile != "" {
-				// Write to file
-				file, err := os.Create(outputFile)
-				if err != nil {
-					log.Fatalf("Failed to create output file: %v", err)
-				}
-				defer file.Close()
-
-				// Use our formatter for better output
-				pkg.FormatAnalysisReport(file, report, false) // No colors in file output
-				log.Printf("Results saved to %s", outputFile)
-			} else {
-				// Use colors if stdout is a terminal and colors are enabled
-				useColors := isTerminal(os.Stdout) && cfg.Output.Colors
-
-				// Print to console using our formatter
-				pkg.FormatAnalysisReport(os.Stdout, report, useColors)
-			}
+			// Use our formatter for better output
+			pkg.FormatAnalysisReport(file, report, false) // No colors in file output
+			log.Printf("Results saved to %s", outputFile)
 		} else {
-			// Synchronous mode
-			log.Printf("Sending %d instances to GreenOps API for analysis with timeout of %d seconds...",
-				len(instances), cfg.API.Timeout)
-			httpCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.API.Timeout)*time.Second)
-			defer cancel()
+			// Use colors if stdout is a terminal and colors are enabled
+			useColors := isTerminal(os.Stdout) && cfg.Output.Colors
 
-			// Create HTTP request with timeout
-			req, err := http.NewRequestWithContext(httpCtx, "POST", cfg.API.URL, bytes.NewBuffer(requestBody))
-			if err != nil {
-				log.Fatalf("Failed to create HTTP request: %v", err)
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			// Add retry logic for HTTP requests
-			maxRetries := 3
-			var resp *http.Response
-
-			for attempt := 0; attempt < maxRetries; attempt++ {
-				if attempt > 0 {
-					log.Printf("Retry attempt %d/%d after waiting %d seconds", attempt+1, maxRetries, attempt*5)
-					time.Sleep(time.Duration(attempt*5) * time.Second) // Exponential backoff
-				}
-
-				resp, err = client.Do(req)
-				if err == nil {
-					break // Success, exit retry loop
-				}
-
-				if attempt == maxRetries-1 || (!strings.Contains(err.Error(), "timeout") &&
-					!strings.Contains(err.Error(), "deadline exceeded")) {
-					// Last attempt or non-timeout error
-					if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline exceeded") {
-						log.Fatalf("API request timed out after %d retries. Try increasing the timeout with --timeout or reduce the number of instances with --limit", maxRetries)
-					}
-					log.Fatalf("API request failed after %d retries: %v", attempt+1, err)
-				}
-
-				log.Printf("Request attempt %d failed: %v. Retrying...", attempt+1, err)
-			}
-
-			defer resp.Body.Close()
-
-			// Read the response
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				log.Fatalf("Failed to read API response: %v", err)
-			}
-
-			// Check response status
-			if resp.StatusCode != http.StatusOK {
-				if resp.StatusCode == http.StatusServiceUnavailable {
-					log.Fatalf("API service unavailable (503). The service might be experiencing high load or temporary issues with the underlying models. Try again later or with fewer instances.")
-				} else {
-					log.Fatalf("API returned error status %d: %s", resp.StatusCode, respBody)
-				}
-			}
-
-			// Parse the response
-			var apiResponse ServerResponse
-			if err := json.Unmarshal(respBody, &apiResponse); err != nil {
-				log.Fatalf("Failed to parse API response: %v", err)
-			}
-
-			// Output the analysis results
-			if outputFile != "" {
-				// Write to file
-				file, err := os.Create(outputFile)
-				if err != nil {
-					log.Fatalf("Failed to create output file: %v", err)
-				}
-				defer file.Close()
-
-				// Use our formatter for better output
-				pkg.FormatAnalysisReport(file, apiResponse.Report, false) // No colors in file output
-				log.Printf("Results saved to %s", outputFile)
-			} else {
-				// Use colors if stdout is a terminal and colors are enabled
-				useColors := isTerminal(os.Stdout) && cfg.Output.Colors
-
-				// Print to console using our formatter
-				pkg.FormatAnalysisReport(os.Stdout, apiResponse.Report, useColors)
-			}
+			// Print to console using our formatter
+			pkg.FormatAnalysisReport(os.Stdout, report, useColors)
 		}
 	} else {
-		log.Println("EC2 resource scan not enabled in configuration.")
-	}
-}
+		// Synchronous mode
+		log.Printf("Sending %d resources to GreenOps API for analysis with timeout of %d seconds...",
+			totalResourceCount, cfg.API.Timeout)
+		httpCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.API.Timeout)*time.Second)
+		defer cancel()
 
-// Helper function to check if a resource type is enabled
-func containsResource(resources []string, resource string) bool {
-	for _, r := range resources {
-		if r == resource {
-			return true
+		// Create HTTP request with timeout
+		req, err := http.NewRequestWithContext(httpCtx, "POST", cfg.API.URL, bytes.NewBuffer(requestBody))
+		if err != nil {
+			log.Fatalf("Failed to create HTTP request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		// Add retry logic for HTTP requests
+		maxRetries := 3
+		var resp *http.Response
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				log.Printf("Retry attempt %d/%d after waiting %d seconds", attempt+1, maxRetries, attempt*5)
+				time.Sleep(time.Duration(attempt*5) * time.Second) // Exponential backoff
+			}
+
+			resp, err = client.Do(req)
+			if err == nil {
+				break // Success, exit retry loop
+			}
+
+			if attempt == maxRetries-1 || (!strings.Contains(err.Error(), "timeout") &&
+				!strings.Contains(err.Error(), "deadline exceeded")) {
+				// Last attempt or non-timeout error
+				if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline exceeded") {
+					log.Fatalf("API request timed out after %d retries. Try increasing the timeout with --timeout or reduce the number of resources with --limit", maxRetries)
+				}
+				log.Fatalf("API request failed after %d retries: %v", attempt+1, err)
+			}
+
+			log.Printf("Request attempt %d failed: %v. Retrying...", attempt+1, err)
+		}
+
+		defer resp.Body.Close()
+
+		// Read the response
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatalf("Failed to read API response: %v", err)
+		}
+
+		// Check response status
+		if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode == http.StatusServiceUnavailable {
+				log.Fatalf("API service unavailable (503). The service might be experiencing high load or temporary issues with the underlying models. Try again later or with fewer resources.")
+			} else {
+				log.Fatalf("API returned error status %d: %s", resp.StatusCode, respBody)
+			}
+		}
+
+		// Parse the response
+		var apiResponse ServerResponse
+		if err := json.Unmarshal(respBody, &apiResponse); err != nil {
+			log.Fatalf("Failed to parse API response: %v", err)
+		}
+
+		// Output the analysis results
+		if outputFile != "" {
+			// Write to file
+			file, err := os.Create(outputFile)
+			if err != nil {
+				log.Fatalf("Failed to create output file: %v", err)
+			}
+			defer file.Close()
+
+			// Use our formatter for better output
+			pkg.FormatAnalysisReport(file, apiResponse.Report, false) // No colors in file output
+			log.Printf("Results saved to %s", outputFile)
+		} else {
+			// Use colors if stdout is a terminal and colors are enabled
+			useColors := isTerminal(os.Stdout) && cfg.Output.Colors
+
+			// Print to console using our formatter
+			pkg.FormatAnalysisReport(os.Stdout, apiResponse.Report, useColors)
 		}
 	}
-	return false
 }
