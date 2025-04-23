@@ -225,79 +225,38 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 	var totalCost float64
 	var potentialCostSavings float64
 
-	// Store values per resource for debugging
-	resourceValueMap := make(map[string]map[string]float64)
-
-	// Helper function to extract numbers from analysis text
-	extractNumberAfterPhrase := func(text, phrase string) float64 {
-		index := strings.Index(text, phrase)
-		if index == -1 {
-			return 0
-		}
-
-		// Get the substring after the phrase
-		substring := text[index+len(phrase):]
-
-		// Extract a number at the start of this substring
-		re := regexp.MustCompile(`([\d\.]+)`)
-		matches := re.FindStringSubmatch(substring)
-		if len(matches) > 0 {
-			if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
-				return val
-			}
-		}
-		return 0
-	}
-
 	// Process each report item
-	for i, item := range report {
-		itemType := string(item.GetResourceType())
-		resourceValueMap[itemType+fmt.Sprintf("_%d", i)] = make(map[string]float64)
-
+	for _, item := range report {
 		// Extract CO2 footprint
 		var itemCO2 float64
 
 		// For RDS, look for "CO2 Footprint: X kg"
 		if item.GetResourceType() == ResourceTypeRDS {
-			if strings.Contains(item.Analysis, "CO2 Footprint:") {
-				itemCO2 = extractNumberAfterPhrase(item.Analysis, "CO2 Footprint:")
+			// Try using markdown bold format first (most common in our output)
+			if strings.Contains(item.Analysis, "**CO2 Footprint**:") {
+				itemCO2 = extractNumberAfterPhrase(item.Analysis, "**CO2 Footprint**:")
 			}
 		} else if item.GetResourceType() == ResourceTypeEC2 {
-			// For EC2, try several patterns
-			if strings.Contains(item.Analysis, "CO2/month") {
-				// First try the calculation result
-				if strings.Contains(item.Analysis, "= ") {
-					textAfterEquals := item.Analysis[strings.Index(item.Analysis, "= ")+2:]
-					if strings.Contains(textAfterEquals, "kg CO2/month") {
-						itemCO2 = extractNumberAfterPhrase(textAfterEquals, "")
-					}
-				}
-
-				// If that doesn't work, look for "Monthly CO2 footprint"
-				if itemCO2 == 0 && strings.Contains(item.Analysis, "Monthly CO2 footprint") {
-					itemCO2 = extractNumberAfterPhrase(item.Analysis, "Monthly CO2 footprint:")
-				}
-
-				// If that doesn't work, look for any number followed by "kg CO2/month"
-				if itemCO2 == 0 {
-					re := regexp.MustCompile(`([\d\.]+)\s*kg CO2/month`)
-					matches := re.FindStringSubmatch(item.Analysis)
-					if len(matches) > 1 {
-						itemCO2, _ = strconv.ParseFloat(matches[1], 64)
-					}
+			// For EC2, look for the Monthly CO2 Footprint calculation
+			if strings.Contains(item.Analysis, "Monthly CO2 Footprint Calculation") {
+				// Try to find the calculation result after "="
+				re := regexp.MustCompile(`= ([\d\.]+) kg CO2/month`)
+				matches := re.FindStringSubmatch(item.Analysis)
+				if len(matches) > 1 {
+					itemCO2, _ = strconv.ParseFloat(matches[1], 64)
 				}
 			}
 		} else if item.GetResourceType() == ResourceTypeS3 {
 			// For S3, try the standard format
-			if strings.Contains(item.Analysis, "CO2 Footprint:") {
-				itemCO2 = extractNumberAfterPhrase(item.Analysis, "CO2 Footprint:")
+			if strings.Contains(item.Analysis, "**CO2 Footprint**:") {
+				itemCO2 = extractNumberAfterPhrase(item.Analysis, "**CO2 Footprint**:")
 			}
 		}
 
 		// Extract cost
 		var itemCost float64
-		if strings.Contains(item.Analysis, "Estimated Monthly Cost:") {
-			costText := item.Analysis[strings.Index(item.Analysis, "Estimated Monthly Cost:"):]
+		if strings.Contains(item.Analysis, "**Estimated Monthly Cost**:") {
+			costText := item.Analysis[strings.Index(item.Analysis, "**Estimated Monthly Cost**:"):]
 			if strings.Contains(costText, "$") {
 				itemCost = extractNumberAfterPhrase(costText, "$")
 			}
@@ -305,8 +264,8 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 
 		// Extract savings
 		var itemCostSavings float64
-		if strings.Contains(item.Analysis, "Monthly Savings Potential:") {
-			savingsText := item.Analysis[strings.Index(item.Analysis, "Monthly Savings Potential:"):]
+		if strings.Contains(item.Analysis, "**Monthly Savings Potential**:") {
+			savingsText := item.Analysis[strings.Index(item.Analysis, "**Monthly Savings Potential**:"):]
 			if strings.Contains(savingsText, "$") {
 				itemCostSavings = extractNumberAfterPhrase(savingsText, "$")
 			}
@@ -315,52 +274,11 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 		// Extract or calculate CO2 savings
 		var itemCO2Savings float64
 
-		// For RDS, use the percentage savings
-		if item.GetResourceType() == ResourceTypeRDS && itemCO2 > 0 {
-			// Extract the percentage savings - look for "(X%)"
-			savingsPctText := item.Analysis[strings.Index(item.Analysis, "Monthly Savings Potential:"):]
-			re := regexp.MustCompile(`\(([\d\.]+)%\)`)
-			matches := re.FindStringSubmatch(savingsPctText)
-			if len(matches) > 1 {
-				savingsPct, _ := strconv.ParseFloat(matches[1], 64)
-				itemCO2Savings = itemCO2 * (savingsPct / 100.0)
-			}
-		} else if item.GetResourceType() == ResourceTypeEC2 && itemCO2 > 0 {
-			// For EC2, look for explicit CO2 reduction statements
-			if strings.Contains(item.Analysis, "CO2 reduction:") {
-				reductionText := item.Analysis[strings.Index(item.Analysis, "CO2 reduction:"):]
-				itemCO2Savings = extractNumberAfterPhrase(reductionText, ":")
-			} else if strings.Contains(item.Analysis, "reduce carbon footprint by") {
-				reductionText := item.Analysis[strings.Index(item.Analysis, "reduce carbon footprint by"):]
-				// Extract percentage
-				re := regexp.MustCompile(`by\s*~?(\d+)%`)
-				matches := re.FindStringSubmatch(reductionText)
-				if len(matches) > 1 {
-					redPct, _ := strconv.ParseFloat(matches[1], 64)
-					itemCO2Savings = itemCO2 * (redPct / 100.0)
-				}
-			} else if strings.Contains(item.Analysis, "wasted emissions") {
-				// Look for wasted emissions statement
-				re := regexp.MustCompile(`([\d\.]+)\s*kg CO2/month.*wasted emissions`)
-				matches := re.FindStringSubmatch(item.Analysis)
-				if len(matches) > 1 {
-					wastedCO2, _ := strconv.ParseFloat(matches[1], 64)
-					itemCO2Savings = wastedCO2 * 0.75 // Assume we can recover 75% of waste
-				}
-			}
-		}
-
-		// For S3, use the cost savings ratio
-		if item.GetResourceType() == ResourceTypeS3 && itemCO2 > 0 && itemCost > 0 && itemCostSavings > 0 {
+		// Calculate CO2 savings using the same ratio as cost savings
+		if itemCO2 > 0 && itemCost > 0 && itemCostSavings > 0 {
 			savingsRatio := itemCostSavings / itemCost
 			itemCO2Savings = itemCO2 * savingsRatio
 		}
-
-		// Store for debugging
-		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["co2"] = itemCO2
-		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["co2_savings"] = itemCO2Savings
-		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["cost"] = itemCost
-		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["cost_savings"] = itemCostSavings
 
 		// Add to totals
 		totalCO2 += itemCO2
@@ -460,7 +378,7 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 		safePercentage(potentialCostSavings, totalCost))
 	fmt.Fprintf(w, "• Projected annual savings: $%.2f\n", potentialCostSavings*12)
 
-	// Add sustainability tips
+	// Add sustainability tips (replaced with static tips for now)
 	if colorize {
 		fmt.Fprintf(w, "\n%sSUSTAINABILITY TIPS%s\n", ColorBold+ColorGreen, ColorReset)
 		fmt.Fprintf(w, "─────────────────\n")
@@ -468,11 +386,41 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 		fmt.Fprintf(w, "\nSUSTAINABILITY TIPS\n")
 		fmt.Fprintf(w, "─────────────────\n")
 	}
-	fmt.Fprintf(w, "• Use auto-scaling to match resource capacity with actual demand\n")
-	fmt.Fprintf(w, "• Implement lifecycle policies for S3 to transition infrequently accessed data\n")
-	fmt.Fprintf(w, "• Consider graviton-based instances for better energy efficiency\n")
-	fmt.Fprintf(w, "• Schedule non-production resources to shut down during off-hours\n")
-	fmt.Fprintf(w, "• Choose AWS regions with lower carbon intensity for new deployments\n")
+
+	// Static tips for demonstration
+	tips := []string{
+		"Right-size EC2 instances with consistently low CPU utilization to match actual workload needs",
+		"Implement lifecycle policies for S3 buckets to transition infrequently accessed data to cheaper storage classes",
+		"Consider using AWS Graviton processors for better energy efficiency and cost savings",
+		"Schedule non-production resources to automatically shut down during off-hours",
+		"Choose AWS regions with lower carbon intensity for new deployments or migrations",
+	}
+
+	// Print the tips
+	for _, tip := range tips {
+		fmt.Fprintf(w, "• %s\n", tip)
+	}
+}
+
+// Helper function to extract numbers from text
+func extractNumberAfterPhrase(text, phrase string) float64 {
+	index := strings.Index(text, phrase)
+	if index == -1 {
+		return 0
+	}
+
+	// Get the substring after the phrase
+	substring := text[index+len(phrase):]
+
+	// Extract a number at the start of this substring
+	re := regexp.MustCompile(`([\d\.]+)`)
+	matches := re.FindStringSubmatch(substring)
+	if len(matches) > 0 {
+		if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
+			return val
+		}
+	}
+	return 0
 }
 
 // safePercentage calculates a percentage safely avoiding division by zero

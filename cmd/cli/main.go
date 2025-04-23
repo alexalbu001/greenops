@@ -54,7 +54,7 @@ func init() {
 	flag.IntVar(&timeout, "timeout", 60, "API request timeout in seconds")
 	flag.IntVar(&resourceCap, "limit", 10, "Maximum number of resources to scan")
 	flag.BoolVar(&noColor, "no-color", false, "Disable colorized output")
-	flag.BoolVar(&asyncMode, "async", false, "Use asynchronous processing mode")
+	flag.BoolVar(&asyncMode, "async", true, "Use asynchronous processing mode")
 	flag.IntVar(&pollInterval, "poll-interval", 5, "Polling interval in seconds for async mode")
 	flag.IntVar(&maxPollRetry, "poll-max", 60, "Maximum number of polling attempts")
 	flag.StringVar(&resources, "resources", "ec2,s3,rds", "Comma-separated list of resources to scan (ec2,s3,rds)")
