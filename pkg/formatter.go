@@ -31,6 +31,7 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	printSustainabilityHeader(w, colorize)
 	printHeader(w, "GreenOps Analysis Report", colorize)
 	fmt.Fprintf(w, "Generated: %s\n", time.Now().Format(time.RFC1123))
+	printSustainabilitySummary(w, report, colorize)
 
 	// Pre-process and separate resources by type
 	var ec2Items []ReportItem
@@ -195,9 +196,6 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 			printRDSDetails(w, i+1, item, colorize)
 		}
 	}
-
-	// Print sustainability summary at the end
-	printSustainabilitySummary(w, report, colorize)
 }
 
 // printSustainabilityHeader prints a banner for sustainability focus
