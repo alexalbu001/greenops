@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,11 +22,13 @@ const (
 	ColorCyan    = "\033[36m"
 	ColorWhite   = "\033[37m"
 	ColorBold    = "\033[1m"
+	ColorGrey    = "\033[90m"
 )
 
 // FormatAnalysisReport prints the analysis results in a user-friendly format
 func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	// Header
+	printSustainabilityHeader(w, colorize)
 	printHeader(w, "GreenOps Analysis Report", colorize)
 	fmt.Fprintf(w, "Generated: %s\n", time.Now().Format(time.RFC1123))
 
@@ -191,6 +195,292 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 			printRDSDetails(w, i+1, item, colorize)
 		}
 	}
+
+	// Print sustainability summary at the end
+	printSustainabilitySummary(w, report, colorize)
+}
+
+// printSustainabilityHeader prints a banner for sustainability focus
+func printSustainabilityHeader(w io.Writer, colorize bool) {
+	banner := `
+    ____                     ____            
+   / ___| _ __ ___  ___ _ __|  _ \ _ __  ___ 
+  | |  _ | '__/ _ \/ _ \ '_ \ |_) | '_ \/ __|
+  | |_| || | |  __/  __/ | | |  __/| |_) \__ \
+   \____|_|  \___|\___|_| |_|_|   | .__/|___/
+        Optimize AWS for Sustainability       
+`
+	if colorize {
+		fmt.Fprintf(w, "%s%s%s\n", ColorGreen, banner, ColorReset)
+	} else {
+		fmt.Fprintf(w, "%s\n", banner)
+	}
+}
+
+// printSustainabilitySummary prints a summary of CO2 emissions and potential savings
+func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool) {
+	// Calculate total CO2 and potential savings
+	var totalCO2 float64
+	var potentialCO2Savings float64
+	var totalCost float64
+	var potentialCostSavings float64
+
+	// Store values per resource for debugging
+	resourceValueMap := make(map[string]map[string]float64)
+
+	// Helper function to extract numbers from analysis text
+	extractNumberAfterPhrase := func(text, phrase string) float64 {
+		index := strings.Index(text, phrase)
+		if index == -1 {
+			return 0
+		}
+
+		// Get the substring after the phrase
+		substring := text[index+len(phrase):]
+
+		// Extract a number at the start of this substring
+		re := regexp.MustCompile(`([\d\.]+)`)
+		matches := re.FindStringSubmatch(substring)
+		if len(matches) > 0 {
+			if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
+				return val
+			}
+		}
+		return 0
+	}
+
+	// Process each report item
+	for i, item := range report {
+		itemType := string(item.GetResourceType())
+		resourceValueMap[itemType+fmt.Sprintf("_%d", i)] = make(map[string]float64)
+
+		// Extract CO2 footprint
+		var itemCO2 float64
+
+		// For RDS, look for "CO2 Footprint: X kg"
+		if item.GetResourceType() == ResourceTypeRDS {
+			if strings.Contains(item.Analysis, "CO2 Footprint:") {
+				itemCO2 = extractNumberAfterPhrase(item.Analysis, "CO2 Footprint:")
+			}
+		} else if item.GetResourceType() == ResourceTypeEC2 {
+			// For EC2, try several patterns
+			if strings.Contains(item.Analysis, "CO2/month") {
+				// First try the calculation result
+				if strings.Contains(item.Analysis, "= ") {
+					textAfterEquals := item.Analysis[strings.Index(item.Analysis, "= ")+2:]
+					if strings.Contains(textAfterEquals, "kg CO2/month") {
+						itemCO2 = extractNumberAfterPhrase(textAfterEquals, "")
+					}
+				}
+
+				// If that doesn't work, look for "Monthly CO2 footprint"
+				if itemCO2 == 0 && strings.Contains(item.Analysis, "Monthly CO2 footprint") {
+					itemCO2 = extractNumberAfterPhrase(item.Analysis, "Monthly CO2 footprint:")
+				}
+
+				// If that doesn't work, look for any number followed by "kg CO2/month"
+				if itemCO2 == 0 {
+					re := regexp.MustCompile(`([\d\.]+)\s*kg CO2/month`)
+					matches := re.FindStringSubmatch(item.Analysis)
+					if len(matches) > 1 {
+						itemCO2, _ = strconv.ParseFloat(matches[1], 64)
+					}
+				}
+			}
+		} else if item.GetResourceType() == ResourceTypeS3 {
+			// For S3, try the standard format
+			if strings.Contains(item.Analysis, "CO2 Footprint:") {
+				itemCO2 = extractNumberAfterPhrase(item.Analysis, "CO2 Footprint:")
+			}
+		}
+
+		// Extract cost
+		var itemCost float64
+		if strings.Contains(item.Analysis, "Estimated Monthly Cost:") {
+			costText := item.Analysis[strings.Index(item.Analysis, "Estimated Monthly Cost:"):]
+			if strings.Contains(costText, "$") {
+				itemCost = extractNumberAfterPhrase(costText, "$")
+			}
+		}
+
+		// Extract savings
+		var itemCostSavings float64
+		if strings.Contains(item.Analysis, "Monthly Savings Potential:") {
+			savingsText := item.Analysis[strings.Index(item.Analysis, "Monthly Savings Potential:"):]
+			if strings.Contains(savingsText, "$") {
+				itemCostSavings = extractNumberAfterPhrase(savingsText, "$")
+			}
+		}
+
+		// Extract or calculate CO2 savings
+		var itemCO2Savings float64
+
+		// For RDS, use the percentage savings
+		if item.GetResourceType() == ResourceTypeRDS && itemCO2 > 0 {
+			// Extract the percentage savings - look for "(X%)"
+			savingsPctText := item.Analysis[strings.Index(item.Analysis, "Monthly Savings Potential:"):]
+			re := regexp.MustCompile(`\(([\d\.]+)%\)`)
+			matches := re.FindStringSubmatch(savingsPctText)
+			if len(matches) > 1 {
+				savingsPct, _ := strconv.ParseFloat(matches[1], 64)
+				itemCO2Savings = itemCO2 * (savingsPct / 100.0)
+			}
+		} else if item.GetResourceType() == ResourceTypeEC2 && itemCO2 > 0 {
+			// For EC2, look for explicit CO2 reduction statements
+			if strings.Contains(item.Analysis, "CO2 reduction:") {
+				reductionText := item.Analysis[strings.Index(item.Analysis, "CO2 reduction:"):]
+				itemCO2Savings = extractNumberAfterPhrase(reductionText, ":")
+			} else if strings.Contains(item.Analysis, "reduce carbon footprint by") {
+				reductionText := item.Analysis[strings.Index(item.Analysis, "reduce carbon footprint by"):]
+				// Extract percentage
+				re := regexp.MustCompile(`by\s*~?(\d+)%`)
+				matches := re.FindStringSubmatch(reductionText)
+				if len(matches) > 1 {
+					redPct, _ := strconv.ParseFloat(matches[1], 64)
+					itemCO2Savings = itemCO2 * (redPct / 100.0)
+				}
+			} else if strings.Contains(item.Analysis, "wasted emissions") {
+				// Look for wasted emissions statement
+				re := regexp.MustCompile(`([\d\.]+)\s*kg CO2/month.*wasted emissions`)
+				matches := re.FindStringSubmatch(item.Analysis)
+				if len(matches) > 1 {
+					wastedCO2, _ := strconv.ParseFloat(matches[1], 64)
+					itemCO2Savings = wastedCO2 * 0.75 // Assume we can recover 75% of waste
+				}
+			}
+		}
+
+		// For S3, use the cost savings ratio
+		if item.GetResourceType() == ResourceTypeS3 && itemCO2 > 0 && itemCost > 0 && itemCostSavings > 0 {
+			savingsRatio := itemCostSavings / itemCost
+			itemCO2Savings = itemCO2 * savingsRatio
+		}
+
+		// Store for debugging
+		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["co2"] = itemCO2
+		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["co2_savings"] = itemCO2Savings
+		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["cost"] = itemCost
+		resourceValueMap[itemType+fmt.Sprintf("_%d", i)]["cost_savings"] = itemCostSavings
+
+		// Add to totals
+		totalCO2 += itemCO2
+		totalCost += itemCost
+		potentialCO2Savings += itemCO2Savings
+		potentialCostSavings += itemCostSavings
+	}
+
+	// Print sustainability section header
+	if colorize {
+		fmt.Fprintf(w, "\n\n%s╔══════════════════════════════════════════════════════════════╗%s\n", ColorGreen, ColorReset)
+		fmt.Fprintf(w, "%s║                SUSTAINABILITY IMPACT SUMMARY                  ║%s\n", ColorGreen+ColorBold, ColorReset)
+		fmt.Fprintf(w, "%s╚══════════════════════════════════════════════════════════════╝%s\n", ColorGreen, ColorReset)
+	} else {
+		fmt.Fprintln(w, "\n\n╔══════════════════════════════════════════════════════════════╗")
+		fmt.Fprintln(w, "║                SUSTAINABILITY IMPACT SUMMARY                  ║")
+		fmt.Fprintln(w, "╚══════════════════════════════════════════════════════════════╝")
+	}
+
+	// Carbon metrics with fancy formatting
+	if colorize {
+		fmt.Fprintf(w, "\n%sCARBON FOOTPRINT%s\n", ColorBold, ColorReset)
+		fmt.Fprintf(w, "────────────────\n")
+		fmt.Fprintf(w, "Monthly CO2 Emissions: %s%.2f kg CO2e%s\n",
+			ColorYellow, totalCO2, ColorReset)
+		fmt.Fprintf(w, "Potential CO2 Reduction: %s%.2f kg CO2e%s (%.1f%%)\n",
+			ColorGreen, potentialCO2Savings, ColorReset,
+			safePercentage(potentialCO2Savings, totalCO2))
+	} else {
+		fmt.Fprintf(w, "\nCARBON FOOTPRINT\n")
+		fmt.Fprintf(w, "────────────────\n")
+		fmt.Fprintf(w, "Monthly CO2 Emissions: %.2f kg CO2e\n", totalCO2)
+		fmt.Fprintf(w, "Potential CO2 Reduction: %.2f kg CO2e (%.1f%%)\n",
+			potentialCO2Savings,
+			safePercentage(potentialCO2Savings, totalCO2))
+	}
+
+	// Environmental equivalents
+	if colorize {
+		fmt.Fprintf(w, "\n%sENVIRONMENTAL EQUIVALENTS%s\n", ColorBold, ColorReset)
+		fmt.Fprintf(w, "─────────────────────────\n")
+	} else {
+		fmt.Fprintf(w, "\nENVIRONMENTAL EQUIVALENTS\n")
+		fmt.Fprintf(w, "─────────────────────────\n")
+	}
+
+	// Convert CO2 savings to tree-months
+	// A typical tree absorbs ~21 kg CO2 per year (1.75 kg per month)
+	treesNeeded := totalCO2 / 1.75
+	treesSaved := potentialCO2Savings / 1.75
+
+	// Convert CO2 to miles driven (average car emits ~404g CO2 per mile)
+	milesDriven := totalCO2 * 1000 / 404
+	milesSaved := potentialCO2Savings * 1000 / 404
+
+	// Print equivalents with color coding
+	if colorize {
+		fmt.Fprintf(w, "• Current emissions equivalent to: %s%.1f trees%s absorbing CO2 for one month\n",
+			ColorRed, treesNeeded, ColorReset)
+		fmt.Fprintf(w, "• Optimization would save the equivalent of: %s%.1f trees%s per month\n",
+			ColorGreen, treesSaved, ColorReset)
+		fmt.Fprintf(w, "• Current emissions equivalent to driving %s%.1f miles%s (%.1f km)\n",
+			ColorRed, milesDriven, ColorReset, milesDriven*1.60934)
+		fmt.Fprintf(w, "• Optimization would save the equivalent of driving %s%.1f miles%s (%.1f km)\n",
+			ColorGreen, milesSaved, ColorReset, milesSaved*1.60934)
+	} else {
+		fmt.Fprintf(w, "• Current emissions equivalent to: %.1f trees absorbing CO2 for one month\n", treesNeeded)
+		fmt.Fprintf(w, "• Optimization would save the equivalent of: %.1f trees per month\n", treesSaved)
+		fmt.Fprintf(w, "• Current emissions equivalent to driving %.1f miles (%.1f km)\n",
+			milesDriven, milesDriven*1.60934)
+		fmt.Fprintf(w, "• Optimization would save the equivalent of driving %.1f miles (%.1f km)\n",
+			milesSaved, milesSaved*1.60934)
+	}
+
+	// Annual projections
+	if colorize {
+		fmt.Fprintf(w, "\n%sANNUAL PROJECTIONS%s\n", ColorBold, ColorReset)
+		fmt.Fprintf(w, "──────────────────\n")
+	} else {
+		fmt.Fprintf(w, "\nANNUAL PROJECTIONS\n")
+		fmt.Fprintf(w, "──────────────────\n")
+	}
+	fmt.Fprintf(w, "• Annual CO2 emissions: %.2f kg CO2e\n", totalCO2*12)
+	fmt.Fprintf(w, "• Potential annual CO2 reduction: %.2f kg CO2e\n", potentialCO2Savings*12)
+
+	// Cost savings
+	if colorize {
+		fmt.Fprintf(w, "\n%sFINANCIAL IMPACT%s\n", ColorBold, ColorReset)
+		fmt.Fprintf(w, "───────────────\n")
+	} else {
+		fmt.Fprintf(w, "\nFINANCIAL IMPACT\n")
+		fmt.Fprintf(w, "───────────────\n")
+	}
+	fmt.Fprintf(w, "• Monthly cost: $%.2f\n", totalCost)
+	fmt.Fprintf(w, "• Potential monthly savings: $%.2f (%.1f%%)\n",
+		potentialCostSavings,
+		safePercentage(potentialCostSavings, totalCost))
+	fmt.Fprintf(w, "• Projected annual savings: $%.2f\n", potentialCostSavings*12)
+
+	// Add sustainability tips
+	if colorize {
+		fmt.Fprintf(w, "\n%sSUSTAINABILITY TIPS%s\n", ColorBold+ColorGreen, ColorReset)
+		fmt.Fprintf(w, "─────────────────\n")
+	} else {
+		fmt.Fprintf(w, "\nSUSTAINABILITY TIPS\n")
+		fmt.Fprintf(w, "─────────────────\n")
+	}
+	fmt.Fprintf(w, "• Use auto-scaling to match resource capacity with actual demand\n")
+	fmt.Fprintf(w, "• Implement lifecycle policies for S3 to transition infrequently accessed data\n")
+	fmt.Fprintf(w, "• Consider graviton-based instances for better energy efficiency\n")
+	fmt.Fprintf(w, "• Schedule non-production resources to shut down during off-hours\n")
+	fmt.Fprintf(w, "• Choose AWS regions with lower carbon intensity for new deployments\n")
+}
+
+// safePercentage calculates a percentage safely avoiding division by zero
+func safePercentage(part, whole float64) float64 {
+	if whole == 0 {
+		return 0
+	}
+	return (part / whole) * 100
 }
 
 // Utility functions for extracting information from analysis text

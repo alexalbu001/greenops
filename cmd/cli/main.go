@@ -34,6 +34,7 @@ var (
 	asyncMode    bool
 	pollInterval int
 	maxPollRetry int
+	resources    string
 )
 
 // ServerResponse represents the API response format
@@ -56,6 +57,7 @@ func init() {
 	flag.BoolVar(&asyncMode, "async", false, "Use asynchronous processing mode")
 	flag.IntVar(&pollInterval, "poll-interval", 5, "Polling interval in seconds for async mode")
 	flag.IntVar(&maxPollRetry, "poll-max", 60, "Maximum number of polling attempts")
+	flag.StringVar(&resources, "resources", "ec2,s3,rds", "Comma-separated list of resources to scan (ec2,s3,rds)")
 }
 
 // isTerminal detects if the output is going to a terminal
@@ -294,7 +296,8 @@ func main() {
 		cfg.AWS.Region = region
 		cfg.AWS.Profile = profile
 		cfg.Scan.Limit = resourceCap
-		cfg.Scan.Resources = []string{"ec2", "s3"}
+		cfg.Scan.Resources = []string{"ec2", "s3", "rds"}
+		cfg.Scan.Resources = strings.Split(resources, ",")
 		cfg.Scan.Metrics.PeriodDays = 7
 		cfg.Output.Colors = !noColor
 		cfg.Output.Format = "text"
@@ -360,6 +363,13 @@ func main() {
 		log.Printf("Found %d S3 buckets for analysis", len(buckets))
 		requestPayload["s3_buckets"] = buckets
 		totalResourceCount += len(buckets)
+	}
+
+	// Process RDS instances
+	if rdsInstances, ok := scanResults["rds"].([]pkg.RDSInstance); ok && len(rdsInstances) > 0 {
+		log.Printf("Found %d RDS instances for analysis", len(rdsInstances))
+		requestPayload["rds_instances"] = rdsInstances
+		totalResourceCount += len(rdsInstances)
 	}
 
 	if totalResourceCount == 0 {
