@@ -33,7 +33,7 @@ type AnalysisResult struct {
 // and returns the completion text. It handles Titan, Lite V1, and Claude schemas.
 func AnalyzeInstance(ctx context.Context, client *bedrockruntime.Client, invocationID, recordJSON string, cpuAvg float64) (string, error) {
 	// Compose prompt with formatting guidelines for consistent output
-	prompt := fmt.Sprintf(`Here is an EC2 instance record:
+	prompt := fmt.Sprintf(`This is a cloud optimisation tool thats also helping with sustenability efforts. Keep a clean formatting and dont use any "*" or "#". Here is an EC2 instance record. :
 %s
 
 Metrics: 7-day average CPU utilization of %.1f%%.
@@ -43,13 +43,15 @@ Your analysis should include:
 1) Identify any inefficiencies (over-provisioning, idle time).
 2) Estimate monthly CO2 footprint (0.0002 kg CO2 per vCPU-hour).
 3) Suggest a rightsizing or shutdown action.
+4) Provide security recommendations
+5) Provide SUSTENABILITY TIPS for this finding
 
 IMPORTANT: Include a "Cost & Environmental Impact" section with the following format:
-## Cost & Environmental Impact
-- **Estimated Monthly Cost**: $X.XX
-- **Potential Optimized Cost**: $X.XX
-- **Monthly Savings Potential**: $X.XX (XX.X%%)
-- **CO2 Footprint**: X.XX kg CO2 per month
+Cost & Environmental Impact
+- Estimated Monthly Cost: $X.XX
+- Potential Optimized Cost: $X.XX
+- Monthly Savings Potential*: $X.XX (XX.X%%)
+- CO2 Footprint: X.XX kg CO2 per month
 `, recordJSON, cpuAvg)
 
 	var body []byte
@@ -139,7 +141,7 @@ IMPORTANT: Include a "Cost & Environmental Impact" section with the following fo
 	result := extractTextFromResponse(data)
 
 	// Check if the response has the properly formatted section
-	if !strings.Contains(result, "**CO2 Footprint**:") {
+	if !strings.Contains(result, "CO2 Footprint:") {
 		// We need to extract the CO2 calculation and reformat
 		co2Value := extractCO2Value(result)
 
@@ -169,18 +171,18 @@ IMPORTANT: Include a "Cost & Environmental Impact" section with the following fo
 
 		// Format the Cost & Environmental Impact section
 		costSection := fmt.Sprintf(`
-## Cost & Environmental Impact
-- **Estimated Monthly Cost**: $%.2f
-- **Potential Optimized Cost**: $%.2f
-- **Monthly Savings Potential**: $%.2f (%.1f%%)
-- **CO2 Footprint**: %.3f kg CO2 per month
+Cost & Environmental Impact
+- Estimated Monthly Cost: $%.2f
+- Potential Optimized Cost: $%.2f
+- Monthly Savings Potential: $%.2f (%.1f%%)
+- CO2 Footprint: %.3f kg CO2 per month
 `, monthlyCost, optimizedCost, savingsAmount, potentialSavings*100, co2Value)
 
 		// If there's an existing section with "CO2 Footprint Calculation" or similar, replace it
 		// Otherwise, append the new section before any recommendations
-		if idx := strings.Index(result, "## CO2 Footprint"); idx > 0 {
+		if idx := strings.Index(result, " CO2 Footprint"); idx > 0 {
 			// Find the next section
-			nextSection := strings.Index(result[idx:], "##")
+			nextSection := strings.Index(result[idx:], "")
 			if nextSection > 0 {
 				// Replace the entire section
 				result = result[:idx] + costSection + result[idx+nextSection:]
@@ -188,9 +190,9 @@ IMPORTANT: Include a "Cost & Environmental Impact" section with the following fo
 				// Replace to the end
 				result = result[:idx] + costSection
 			}
-		} else if idx := strings.Index(result, "## Environmental Impact"); idx > 0 {
+		} else if idx := strings.Index(result, " Environmental Impact"); idx > 0 {
 			// Find the next section
-			nextSection := strings.Index(result[idx:], "##")
+			nextSection := strings.Index(result[idx:], "")
 			if nextSection > 0 {
 				// Replace the entire section
 				result = result[:idx] + costSection + result[idx+nextSection:]
@@ -198,7 +200,7 @@ IMPORTANT: Include a "Cost & Environmental Impact" section with the following fo
 				// Replace to the end
 				result = result[:idx] + costSection
 			}
-		} else if idx := strings.Index(result, "## Recommendations"); idx > 0 {
+		} else if idx := strings.Index(result, " Recommendations"); idx > 0 {
 			// Insert before recommendations
 			result = result[:idx] + costSection + result[idx:]
 		} else {

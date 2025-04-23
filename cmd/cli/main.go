@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/briandowns/spinner"
+
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 
 	pkg "github.com/alexalbu001/greenops/pkg"
@@ -36,6 +38,7 @@ var (
 	maxPollRetry int
 	resources    string
 	pdfOutput    string
+	verbose      bool
 )
 
 // ServerResponse represents the API response format
@@ -60,6 +63,7 @@ func init() {
 	flag.IntVar(&maxPollRetry, "poll-max", 60, "Maximum number of polling attempts")
 	flag.StringVar(&resources, "resources", "ec2,s3,rds", "Comma-separated list of resources to scan (ec2,s3,rds)")
 	flag.StringVar(&pdfOutput, "pdf", "", "Export results to PDF file")
+	flag.BoolVar(&verbose, "verbose", false, "Show debug and scan logs (stderr)")
 }
 
 // isTerminal detects if the output is going to a terminal
@@ -97,7 +101,7 @@ Examples:
 
 // pollForJobResults polls the API for job results until completed or max attempts reached
 func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, client *http.Client) ([]pkg.ReportItem, error) {
-	// Construct the job status URL
+	// Construct URLs
 	baseURL := cfg.API.URL
 	if strings.HasSuffix(baseURL, "/analyze") {
 		baseURL = baseURL[:len(baseURL)-len("/analyze")]
@@ -105,77 +109,65 @@ func pollForJobResults(ctx context.Context, jobID string, cfg *pkg.Config, clien
 	jobURL := fmt.Sprintf("%s/jobs/%s", baseURL, jobID)
 	resultsURL := fmt.Sprintf("%s/jobs/%s/results", baseURL, jobID)
 
-	var lastCompletedItems int = 0
-	var noProgressCounter int = 0
+	// Start spinner on stderr
+	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond, spinner.WithWriter(os.Stderr))
+	s.Prefix = "⠋ Waiting for analysis… "
+	s.Start()
+
+	var lastCompleted int
+	var noProgress int
 
 	for attempt := 0; attempt < maxPollRetry; attempt++ {
-		log.Printf("Polling job status (attempt %d/%d)...", attempt+1, maxPollRetry)
+		// Update spinner
+		// s.Suffix = fmt.Sprintf("", lastCompleted, cfg.Scan.Limit)
 
+		// Fetch status
 		req, err := http.NewRequestWithContext(ctx, "GET", jobURL, nil)
 		if err != nil {
+			s.Stop()
 			return nil, fmt.Errorf("failed to create job status request: %v", err)
 		}
-
 		resp, err := client.Do(req)
 		if err != nil {
+			s.Stop()
 			return nil, fmt.Errorf("failed to get job status: %v", err)
 		}
-
-		body, err := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read job status response: %v", err)
-		}
 
-		// Parse the status response
-		var statusResp struct {
-			JobID          string `json:"job_id"`
+		var st struct {
 			Status         string `json:"status"`
 			TotalItems     int    `json:"total_items"`
 			CompletedItems int    `json:"completed_items"`
 			FailedItems    int    `json:"failed_items"`
 		}
-
-		err = json.Unmarshal(body, &statusResp)
-		if err != nil {
-			log.Printf("Warning: Failed to parse job status: %v", err)
+		if err := json.Unmarshal(body, &st); err != nil {
+			// transient parse error; retry
 			time.Sleep(time.Duration(pollInterval) * time.Second)
 			continue
 		}
 
-		log.Printf("Job status: %s (%d/%d items processed, %d failed)",
-			statusResp.Status, statusResp.CompletedItems, statusResp.TotalItems, statusResp.FailedItems)
-
-		// If job is completed or failed, get results
-		if statusResp.Status == "completed" || statusResp.Status == "failed" {
-			return getResultsDirectly(ctx, resultsURL, client)
-		}
-
-		// Check if all items are processed, even if status hasn't been updated yet
-		if statusResp.CompletedItems+statusResp.FailedItems >= statusResp.TotalItems {
-			noProgressCounter++
-
-			// If all items are processed but status hasn't changed for 3 consecutive polls,
-			// consider the job complete and get results directly
-			if noProgressCounter >= 3 {
-				log.Printf("All items processed but job status still '%s'. Getting results directly after %d polls with no status change.",
-					statusResp.Status, noProgressCounter)
-
-				return getResultsDirectly(ctx, resultsURL, client)
-			}
+		// Progress tracking
+		if st.CompletedItems > lastCompleted {
+			lastCompleted = st.CompletedItems
+			noProgress = 0
 		} else {
-			// Reset counter if we see progress
-			if statusResp.CompletedItems > lastCompletedItems {
-				lastCompletedItems = statusResp.CompletedItems
-				noProgressCounter = 0
-			}
+			noProgress++
 		}
 
-		// Wait before next poll
+		// Done?
+		if st.Status == "completed" || st.Status == "failed" ||
+			(st.CompletedItems+st.FailedItems >= st.TotalItems && noProgress >= 3) {
+			break
+		}
+
 		time.Sleep(time.Duration(pollInterval) * time.Second)
 	}
 
-	return nil, fmt.Errorf("maximum polling attempts reached - job may still be running")
+	// Stop spinner and fetch results
+	s.Stop()
+	// fmt.Fprintln(os.Stderr, "Getting results directly from", resultsURL)
+	return getResultsDirectly(ctx, resultsURL, client)
 }
 
 // getResultsDirectly retrieves results from the direct results endpoint
@@ -219,6 +211,13 @@ func getResultsDirectly(ctx context.Context, resultsURL string, client *http.Cli
 func main() {
 	// Parse command-line flags
 	flag.Parse()
+	if !verbose {
+		// send the default logger to stderr only
+		log.SetOutput(os.Stderr)
+	} else {
+		// include file/line info for debug
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
+	}
 
 	// Show help if requested
 	if len(os.Args) == 1 || (len(os.Args) == 2 && (os.Args[1] == "-h" || os.Args[1] == "--help")) {
@@ -389,11 +388,10 @@ func main() {
 	client := &http.Client{
 		Timeout: time.Duration(cfg.API.Timeout) * time.Second,
 	}
-	log.Printf("Using HTTP client with timeout: %s", client.Timeout)
 
 	// Process based on mode (sync or async)
 	if asyncMode {
-		log.Printf("Using asynchronous mode for processing %d resources...", totalResourceCount)
+		// log.Printf("Using asynchronous mode for processing %d resources...", totalResourceCount)
 
 		// Send async request
 		req, err := http.NewRequestWithContext(ctx, "POST", cfg.API.URL, bytes.NewBuffer(requestBody))

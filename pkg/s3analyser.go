@@ -82,7 +82,7 @@ func AnalyzeS3BucketWithBedrock(
 	}
 
 	// Construct the prompt
-	prompt := fmt.Sprintf(`Here is an S3 bucket record:
+	prompt := fmt.Sprintf(`Here is an S3 bucket record.Keep a clean formatting and dont use any "*" or "#". This is a cloud optimisation tool thats also helping with sustenability efforts :
 %s
 
 Metrics:
@@ -96,6 +96,7 @@ Metrics:
 3) Analyze access patterns vs storage setup.
 4) Suggest specific actionable optimizations with estimated impacts.
 5) Identify any security or data protection concerns.
+6) Provide SUSTENABILITY TIPS for this finding
 `, bucketJSON, co2Footprint, currentCost, optimizedCost, savingsPercent)
 
 	// Use the Bedrock model to generate analysis (similar to AnalyzeInstance function)
@@ -185,23 +186,23 @@ func generateS3Analysis(bucket S3Bucket, analysis S3BucketAnalysis) (string, err
 	sb.WriteString(fmt.Sprintf("# S3 Bucket Analysis: %s\n\n", bucket.BucketName))
 
 	// Bucket details
-	sb.WriteString("## Bucket Details\n")
-	sb.WriteString(fmt.Sprintf("- **Name**: %s\n", bucket.BucketName))
-	sb.WriteString(fmt.Sprintf("- **Region**: %s\n", bucket.Region))
-	sb.WriteString(fmt.Sprintf("- **Created**: %s\n", bucket.CreationDate.Format("January 2, 2006")))
-	sb.WriteString(fmt.Sprintf("- **Size**: %.2f GB\n", float64(bucket.SizeBytes)/(1024*1024*1024)))
-	sb.WriteString(fmt.Sprintf("- **Objects**: %d\n", bucket.ObjectCount))
+	sb.WriteString(" Bucket Details\n")
+	sb.WriteString(fmt.Sprintf("- Name: %s\n", bucket.BucketName))
+	sb.WriteString(fmt.Sprintf("- Region: %s\n", bucket.Region))
+	sb.WriteString(fmt.Sprintf("- Created: %s\n", bucket.CreationDate.Format("January 2, 2006")))
+	sb.WriteString(fmt.Sprintf("- Size: %.2f GB\n", float64(bucket.SizeBytes)/(1024*1024*1024)))
+	sb.WriteString(fmt.Sprintf("- Objects: %d\n", bucket.ObjectCount))
 
 	// Last activity
 	if !bucket.LastModified.IsZero() {
 		daysSinceModified := int(time.Since(bucket.LastModified).Hours() / 24)
-		sb.WriteString(fmt.Sprintf("- **Last Modified**: %s (%d days ago)\n",
+		sb.WriteString(fmt.Sprintf("- Last Modified: %s (%d days ago)\n",
 			bucket.LastModified.Format("January 2, 2006"), daysSinceModified))
 	}
 
 	// Tags if they exist
 	if len(bucket.Tags) > 0 {
-		sb.WriteString("- **Tags**: ")
+		sb.WriteString("- Tags: ")
 		tagCount := 0
 		for k, v := range bucket.Tags {
 			if tagCount > 0 {
@@ -216,7 +217,7 @@ func generateS3Analysis(bucket S3Bucket, analysis S3BucketAnalysis) (string, err
 	sb.WriteString("\n")
 
 	// Storage class analysis
-	sb.WriteString("## 1. Storage Class Distribution\n\n")
+	sb.WriteString(" 1. Storage Class Distribution\n\n")
 	hasStandardStorage := false
 	standardPct := 0.0
 
@@ -232,21 +233,21 @@ func generateS3Analysis(bucket S3Bucket, analysis S3BucketAnalysis) (string, err
 		if bucket.SizeBytes > 0 {
 			percentage = (float64(bytes) / float64(bucket.SizeBytes)) * 100
 		}
-		sb.WriteString(fmt.Sprintf("- **%s**: %.2f GB (%.1f%%)\n", class, float64(bytes)/(1024*1024*1024), percentage))
+		sb.WriteString(fmt.Sprintf("- %s: %.2f GB (%.1f%%)\n", class, float64(bytes)/(1024*1024*1024), percentage))
 	}
 
 	sb.WriteString("\n")
 
 	// Analysis based on storage classes
 	if hasStandardStorage && standardPct > 75 && bucket.SizeBytes > 5*1024*1024*1024 { // > 5GB
-		sb.WriteString("**Finding**: This bucket primarily uses STANDARD storage class, which is the most expensive.\n\n")
+		sb.WriteString("Finding: This bucket primarily uses STANDARD storage class, which is the most expensive.\n\n")
 	}
 
 	// Lifecycle rule analysis
-	sb.WriteString("## 2. Lifecycle Configuration\n\n")
+	sb.WriteString(" 2. Lifecycle Configuration\n\n")
 
 	if len(bucket.LifecycleRules) == 0 {
-		sb.WriteString("**Finding**: No lifecycle rules are configured for this bucket. ")
+		sb.WriteString("Finding: No lifecycle rules are configured for this bucket. ")
 
 		if bucket.SizeBytes > 1*1024*1024*1024 && hasStandardStorage { // > 1GB
 			sb.WriteString("Adding lifecycle rules could reduce costs by transitioning objects to cheaper storage classes.\n\n")
@@ -288,51 +289,51 @@ func generateS3Analysis(bucket S3Bucket, analysis S3BucketAnalysis) (string, err
 		}
 
 		if !hasEnabledTransitions && hasStandardStorage && bucket.SizeBytes > 1*1024*1024*1024 {
-			sb.WriteString("**Finding**: No enabled lifecycle rules with storage transitions were found. ")
+			sb.WriteString("Finding: No enabled lifecycle rules with storage transitions were found. ")
 			sb.WriteString("Consider enabling transitions to optimize storage costs.\n\n")
 		}
 	}
 
 	// Access pattern analysis
-	sb.WriteString("## 3. Access Patterns\n\n")
+	sb.WriteString(" 3. Access Patterns\n\n")
 
 	// Get access values or set defaults
 	getRequests := bucket.AccessFrequency["GetRequests"]
 	putRequests := bucket.AccessFrequency["PutRequests"]
 	deleteRequests := bucket.AccessFrequency["DeleteRequests"]
 
-	sb.WriteString(fmt.Sprintf("- **GET Operations**: %.1f per day\n", getRequests))
-	sb.WriteString(fmt.Sprintf("- **PUT Operations**: %.1f per day\n", putRequests))
-	sb.WriteString(fmt.Sprintf("- **DELETE Operations**: %.1f per day\n", deleteRequests))
+	sb.WriteString(fmt.Sprintf("- GET Operations: %.1f per day\n", getRequests))
+	sb.WriteString(fmt.Sprintf("- PUT Operations: %.1f per day\n", putRequests))
+	sb.WriteString(fmt.Sprintf("- DELETE Operations: %.1f per day\n", deleteRequests))
 	sb.WriteString("\n")
 
 	// Analyze access patterns
 	if getRequests < 1.0 && putRequests < 1.0 && hasStandardStorage && standardPct > 50 {
-		sb.WriteString("**Finding**: This bucket has very low access frequency but primarily uses STANDARD storage. ")
+		sb.WriteString("Finding: This bucket has very low access frequency but primarily uses STANDARD storage. ")
 		sb.WriteString("Consider transitioning to STANDARD_IA or GLACIER storage classes.\n\n")
 	} else if getRequests > 1000 && putRequests < 10 {
-		sb.WriteString("**Finding**: This bucket has high read but low write activity, ")
+		sb.WriteString("Finding: This bucket has high read but low write activity, ")
 		sb.WriteString("making it a good candidate for INTELLIGENT_TIERING or read-optimized configurations.\n\n")
 	}
 
 	// Cost and CO2 analysis
-	sb.WriteString("## 4. Cost & Environmental Impact\n\n")
-	sb.WriteString(fmt.Sprintf("- **Estimated Monthly Cost**: $%.2f\n", analysis.CostEstimate.Current))
-	sb.WriteString(fmt.Sprintf("- **Potential Optimized Cost**: $%.2f\n", analysis.CostEstimate.Optimized))
-	sb.WriteString(fmt.Sprintf("- **Monthly Savings Potential**: $%.2f (%.1f%%)\n",
+	sb.WriteString(" 4. Cost & Environmental Impact\n\n")
+	sb.WriteString(fmt.Sprintf("- Estimated Monthly Cost: $%.2f\n", analysis.CostEstimate.Current))
+	sb.WriteString(fmt.Sprintf("- Potential Optimized Cost: $%.2f\n", analysis.CostEstimate.Optimized))
+	sb.WriteString(fmt.Sprintf("- Monthly Savings Potential: $%.2f (%.1f%%)\n",
 		analysis.CostEstimate.SaveAmount, analysis.CostEstimate.SavePct))
-	sb.WriteString(fmt.Sprintf("- **CO2 Footprint**: %.2f kg CO2 per month\n", analysis.CO2Footprint))
+	sb.WriteString(fmt.Sprintf("- CO2 Footprint: %.2f kg CO2 per month\n", analysis.CO2Footprint))
 	sb.WriteString("\n")
 
 	// Recommendations
-	sb.WriteString("## 5. Recommendations\n\n")
+	sb.WriteString(" 5. Recommendations\n\n")
 
 	if analysis.CostEstimate.SavePct > 30 {
-		sb.WriteString("### High Priority\n\n")
+		sb.WriteString("# High Priority\n\n")
 	} else if analysis.CostEstimate.SavePct > 10 {
-		sb.WriteString("### Medium Priority\n\n")
+		sb.WriteString("# Medium Priority\n\n")
 	} else {
-		sb.WriteString("### Recommendations\n\n")
+		sb.WriteString("# Recommendations\n\n")
 	}
 
 	// Generate recommendations based on findings
@@ -341,34 +342,34 @@ func generateS3Analysis(bucket S3Bucket, analysis S3BucketAnalysis) (string, err
 	// Lifecycle rules recommendation
 	if len(bucket.LifecycleRules) == 0 && bucket.SizeBytes > 1*1024*1024*1024 {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Add lifecycle rules** to transition objects to cheaper storage classes after 30-90 days,", recommendationCount))
+		sb.WriteString(fmt.Sprintf("%d. Add lifecycle rules to transition objects to cheaper storage classes after 30-90 days,", recommendationCount))
 		sb.WriteString(fmt.Sprintf(" potentially saving $%.2f per month.\n\n", analysis.CostEstimate.SaveAmount*0.7))
 	}
 
 	// Standard storage recommendation for low-access buckets
 	if hasStandardStorage && standardPct > 70 && getRequests < 1.0 && bucket.SizeBytes > 1*1024*1024*1024 {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Move rarely accessed data** to STANDARD_IA or GLACIER storage classes.", recommendationCount))
+		sb.WriteString(fmt.Sprintf("%d. Move rarely accessed data to STANDARD_IA or GLACIER storage classes.", recommendationCount))
 		sb.WriteString(fmt.Sprintf(" This could save approximately $%.2f per month.\n\n", analysis.CostEstimate.SaveAmount*0.8))
 	}
 
 	// Intelligent tiering recommendation
 	if hasStandardStorage && standardPct > 60 && bucket.SizeBytes > 10*1024*1024*1024 {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Enable INTELLIGENT_TIERING** for this bucket to automatically optimize", recommendationCount))
+		sb.WriteString(fmt.Sprintf("%d. Enable INTELLIGENT_TIERING for this bucket to automatically optimize", recommendationCount))
 		sb.WriteString(" storage costs based on access patterns.\n\n")
 	}
 
 	// Tag recommendation
 	if len(bucket.Tags) == 0 {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Add tags** to this bucket for better cost allocation and management ", recommendationCount))
+		sb.WriteString(fmt.Sprintf("%d. Add tags to this bucket for better cost allocation and management ", recommendationCount))
 		sb.WriteString("(e.g., Environment=Prod, Department=X, Project=Y).\n\n")
 	}
 
 	// Default recommendation if none of the above
 	if recommendationCount == 0 {
-		sb.WriteString("1. **Monitor usage patterns** and revisit optimization opportunities as the bucket grows or usage patterns change.\n\n")
+		sb.WriteString("1. Monitor usage patterns and revisit optimization opportunities as the bucket grows or usage patterns change.\n\n")
 	}
 
 	return sb.String(), nil

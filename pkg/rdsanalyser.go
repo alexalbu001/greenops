@@ -82,7 +82,7 @@ func AnalyzeRDSInstanceWithBedrock(
 	}
 
 	// Construct the prompt
-	prompt := fmt.Sprintf(`Here is an RDS instance record:
+	prompt := fmt.Sprintf(`Keep a clean formatting and dont use any "*" or "#".Here is an RDS instance record. This is a cloud optimisation tool thats also helping sustenability efforts:
 %s
 
 Metrics:
@@ -95,6 +95,7 @@ Metrics:
 2) Estimate monthly CO2 footprint based on instance size and usage.
 3) Suggest specific actions for rightsizing or optimization.
 4) Identify any performance or availability concerns.
+5) Provide SUSTENABILITY TIPS for this findings
 `, instanceJSON, co2Footprint, currentCost, optimizedCost, savingsPercent)
 
 	// Use the Bedrock model to generate analysis (similar to AnalyzeInstance function)
@@ -151,23 +152,23 @@ func generateRDSAnalysis(instance RDSInstance, analysis RDSInstanceAnalysis) (st
 	sb.WriteString(fmt.Sprintf("# RDS Instance Analysis: %s\n\n", instance.InstanceID))
 
 	// Instance details
-	sb.WriteString("## Instance Details\n")
-	sb.WriteString(fmt.Sprintf("- **ID**: %s\n", instance.InstanceID))
-	sb.WriteString(fmt.Sprintf("- **Type**: %s\n", instance.InstanceType))
-	sb.WriteString(fmt.Sprintf("- **Engine**: %s %s\n", instance.Engine, instance.EngineVersion))
-	sb.WriteString(fmt.Sprintf("- **Storage**: %d GB (%s)\n", instance.AllocatedStorage, instance.StorageType))
-	sb.WriteString(fmt.Sprintf("- **Multi-AZ**: %t\n", instance.MultiAZ))
+	sb.WriteString(" Instance Details\n")
+	sb.WriteString(fmt.Sprintf("- ID: %s\n", instance.InstanceID))
+	sb.WriteString(fmt.Sprintf("- Type: %s\n", instance.InstanceType))
+	sb.WriteString(fmt.Sprintf("- Engine: %s %s\n", instance.Engine, instance.EngineVersion))
+	sb.WriteString(fmt.Sprintf("- Storage: %d GB (%s)\n", instance.AllocatedStorage, instance.StorageType))
+	sb.WriteString(fmt.Sprintf("- Multi-AZ: %t\n", instance.MultiAZ))
 
 	if !instance.LaunchTime.IsZero() {
-		sb.WriteString(fmt.Sprintf("- **Launch Time**: %s\n", instance.LaunchTime.Format("January 2, 2006")))
+		sb.WriteString(fmt.Sprintf("- Launch Time: %s\n", instance.LaunchTime.Format("January 2, 2006")))
 		age := time.Since(instance.LaunchTime)
-		sb.WriteString(fmt.Sprintf("- **Age**: %.1f days\n", age.Hours()/24))
+		sb.WriteString(fmt.Sprintf("- Age: %.1f days\n", age.Hours()/24))
 	}
 
 	sb.WriteString("\n")
 
 	// Performance metrics
-	sb.WriteString("## 1. Performance Analysis\n\n")
+	sb.WriteString(" 1. Performance Analysis\n\n")
 
 	// CPU utilization
 	cpuStatus := "Normal"
@@ -179,46 +180,46 @@ func generateRDSAnalysis(instance RDSInstance, analysis RDSInstanceAnalysis) (st
 		cpuStatus = "High utilization"
 	}
 
-	sb.WriteString(fmt.Sprintf("- **CPU Utilization**: %.1f%% (%s)\n", instance.CPUAvg7d, cpuStatus))
-	sb.WriteString(fmt.Sprintf("- **Database Connections**: %.1f average\n", instance.ConnectionsAvg7d))
-	sb.WriteString(fmt.Sprintf("- **IOPS**: %.1f operations per second\n", instance.IOPSAvg7d))
-	sb.WriteString(fmt.Sprintf("- **Storage Used**: %.1f%%\n\n", instance.StorageUsed))
+	sb.WriteString(fmt.Sprintf("- CPU Utilization: %.1f%% (%s)\n", instance.CPUAvg7d, cpuStatus))
+	sb.WriteString(fmt.Sprintf("- Database Connections: %.1f average\n", instance.ConnectionsAvg7d))
+	sb.WriteString(fmt.Sprintf("- IOPS: %.1f operations per second\n", instance.IOPSAvg7d))
+	sb.WriteString(fmt.Sprintf("- Storage Used: %.1f%%\n\n", instance.StorageUsed))
 
 	// Inefficiency analysis
-	sb.WriteString("## 2. Inefficiency Analysis\n\n")
+	sb.WriteString(" 2. Inefficiency Analysis\n\n")
 
 	if instance.CPUAvg7d < 20 {
-		sb.WriteString(fmt.Sprintf("**Finding**: This RDS instance shows **low CPU utilization** at only %.1f%%. ", instance.CPUAvg7d))
+		sb.WriteString(fmt.Sprintf("Finding: This RDS instance shows low CPU utilization at only %.1f%%. ", instance.CPUAvg7d))
 		sb.WriteString("This suggests the instance may be oversized for its current workload.\n\n")
 	}
 
 	if instance.StorageUsed < 50 && instance.AllocatedStorage > 100 {
-		sb.WriteString(fmt.Sprintf("**Finding**: Storage is **overprovisioned** with only %.1f%% of allocated storage in use. ", instance.StorageUsed))
+		sb.WriteString(fmt.Sprintf("Finding: Storage is overprovisioned with only %.1f%% of allocated storage in use. ", instance.StorageUsed))
 		sb.WriteString("This indicates potential for optimization.\n\n")
 	}
 
 	if !instance.MultiAZ && isProductionDatabase(instance) {
-		sb.WriteString("**Finding**: This appears to be a production database but is not using Multi-AZ deployment, which could impact availability.\n\n")
+		sb.WriteString("Finding: This appears to be a production database but is not using Multi-AZ deployment, which could impact availability.\n\n")
 	}
 
 	// Cost and environmental impact
-	sb.WriteString("## 3. Cost & Environmental Impact\n\n")
-	sb.WriteString(fmt.Sprintf("- **Estimated Monthly Cost**: $%.2f\n", analysis.CostEstimate.Current))
-	sb.WriteString(fmt.Sprintf("- **Potential Optimized Cost**: $%.2f\n", analysis.CostEstimate.Optimized))
-	sb.WriteString(fmt.Sprintf("- **Monthly Savings Potential**: $%.2f (%.1f%%)\n",
+	sb.WriteString(" 3. Cost & Environmental Impact\n\n")
+	sb.WriteString(fmt.Sprintf("- Estimated Monthly Cost: $%.2f\n", analysis.CostEstimate.Current))
+	sb.WriteString(fmt.Sprintf("- Potential Optimized Cost: $%.2f\n", analysis.CostEstimate.Optimized))
+	sb.WriteString(fmt.Sprintf("- Monthly Savings Potential: $%.2f (%.1f%%)\n",
 		analysis.CostEstimate.SaveAmount, analysis.CostEstimate.SavePct))
-	sb.WriteString(fmt.Sprintf("- **CO2 Footprint**: %.2f kg CO2 per month\n\n", analysis.CO2Footprint))
+	sb.WriteString(fmt.Sprintf("- CO2 Footprint: %.2f kg CO2 per month\n\n", analysis.CO2Footprint))
 
 	// Recommendations
-	sb.WriteString("## 4. Recommendations\n\n")
+	sb.WriteString(" 4. Recommendations\n\n")
 
 	// Generate recommendations based on findings
 	if analysis.CostEstimate.SavePct > 30 {
-		sb.WriteString("### High Priority\n\n")
+		sb.WriteString(" High Priority\n\n")
 	} else if analysis.CostEstimate.SavePct > 10 {
-		sb.WriteString("### Medium Priority\n\n")
+		sb.WriteString(" Medium Priority\n\n")
 	} else {
-		sb.WriteString("### Recommendations\n\n")
+		sb.WriteString(" Recommendations\n\n")
 	}
 
 	recommendationCount := 0
@@ -226,25 +227,25 @@ func generateRDSAnalysis(instance RDSInstance, analysis RDSInstanceAnalysis) (st
 	// Right-sizing recommendation based on CPU
 	if instance.CPUAvg7d < 5 {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Downsize instance class** - Consider moving to a smaller instance type. ", recommendationCount))
+		sb.WriteString(fmt.Sprintf("%d. Downsize instance class - Consider moving to a smaller instance type. ", recommendationCount))
 		sb.WriteString(fmt.Sprintf("With only %.1f%% CPU utilization, a smaller instance would likely meet your requirements.\n\n", instance.CPUAvg7d))
 	} else if instance.CPUAvg7d < 20 {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Evaluate instance size** - With %.1f%% average CPU utilization, ", recommendationCount, instance.CPUAvg7d))
+		sb.WriteString(fmt.Sprintf("%d. Evaluate instance size - With %.1f%% average CPU utilization, ", recommendationCount, instance.CPUAvg7d))
 		sb.WriteString("you may be able to reduce instance size for cost savings.\n\n")
 	}
 
 	// Storage recommendations
 	if instance.StorageUsed < 30 && instance.AllocatedStorage > 100 {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Reduce allocated storage** - Current usage is only %.1f%% ", recommendationCount, instance.StorageUsed))
+		sb.WriteString(fmt.Sprintf("%d. Reduce allocated storage - Current usage is only %.1f%% ", recommendationCount, instance.StorageUsed))
 		sb.WriteString("of your allocated storage. Consider reducing the allocated storage to match your actual needs.\n\n")
 	}
 
 	// Multi-AZ recommendation for production
 	if !instance.MultiAZ && isProductionDatabase(instance) {
 		recommendationCount++
-		sb.WriteString(fmt.Sprintf("%d. **Enable Multi-AZ deployment** - ", recommendationCount))
+		sb.WriteString(fmt.Sprintf("%d. Enable Multi-AZ deployment - ", recommendationCount))
 		sb.WriteString("For production workloads, Multi-AZ is recommended to improve availability and reliability.\n\n")
 	}
 
@@ -253,7 +254,7 @@ func generateRDSAnalysis(instance RDSInstance, analysis RDSInstanceAnalysis) (st
 		age := time.Since(instance.LaunchTime)
 		if age.Hours()/24 > 90 { // Older than 90 days
 			recommendationCount++
-			sb.WriteString(fmt.Sprintf("%d. **Consider Reserved Instances** - ", recommendationCount))
+			sb.WriteString(fmt.Sprintf("%d. Consider Reserved Instances - ", recommendationCount))
 			sb.WriteString("This instance has been running for over 90 days. If you plan to continue using it, ")
 			sb.WriteString("purchasing a Reserved Instance could reduce costs by 30-60%.\n\n")
 		}
@@ -261,7 +262,7 @@ func generateRDSAnalysis(instance RDSInstance, analysis RDSInstanceAnalysis) (st
 
 	// Default recommendation if none of the above
 	if recommendationCount == 0 {
-		sb.WriteString("1. **Monitor resource usage** - Continue monitoring performance metrics to identify optimization opportunities over time.\n\n")
+		sb.WriteString("1. Monitor resource usage - Continue monitoring performance metrics to identify optimization opportunities over time.\n\n")
 	}
 
 	return sb.String(), nil

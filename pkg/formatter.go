@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 )
 
@@ -32,7 +33,7 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	printHeader(w, "GreenOps Analysis Report", colorize)
 	fmt.Fprintf(w, "Generated: %s\n", time.Now().Format(time.RFC1123))
 	printSustainabilitySummary(w, report, colorize)
-
+	fmt.Printf("\n")
 	// Pre-process and separate resources by type
 	var ec2Items []ReportItem
 	var s3Items []ReportItem
@@ -141,19 +142,19 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	fmt.Fprintf(w, "Total resources analyzed: %d\n", totalCount)
 
 	// Print EC2 summary if there are any instances
-	if len(ec2Items) > 0 {
-		printEC2Summary(w, ec2Items, colorize)
-	}
+	// if len(ec2Items) > 0 {
+	// 	printEC2Summary(w, ec2Items, colorize)
+	// }
 
-	// Print S3 summary if there are any buckets
-	if len(s3Items) > 0 {
-		printS3Summary(w, s3Items, colorize)
-	}
+	// // Print S3 summary if there are any buckets
+	// if len(s3Items) > 0 {
+	// 	printS3Summary(w, s3Items, colorize)
+	// }
 
-	// Print RDS summary if there are any instances
-	if len(rdsItems) > 0 {
-		printRDSSummary(w, rdsItems, colorize)
-	}
+	// // Print RDS summary if there are any instances
+	// if len(rdsItems) > 0 {
+	// 	printRDSSummary(w, rdsItems, colorize)
+	// }
 
 	// Print EC2 instance details
 	if len(ec2Items) > 0 {
@@ -231,10 +232,10 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 		// For RDS, look for "CO2 Footprint: X kg"
 		if item.GetResourceType() == ResourceTypeRDS {
 			// Try using markdown bold format first (most common in our output)
-			if strings.Contains(item.Analysis, "**CO2 Footprint**:") {
-				itemCO2 = extractNumberAfterPhrase(item.Analysis, "**CO2 Footprint**:")
+			if strings.Contains(item.Analysis, "CO2 Footprint:") {
+				itemCO2 = extractNumberAfterPhrase(item.Analysis, "CO2 Footprint:")
+			} else if item.GetResourceType() == ResourceTypeEC2 {
 			}
-		} else if item.GetResourceType() == ResourceTypeEC2 {
 			// For EC2, look for the Monthly CO2 Footprint calculation
 			if strings.Contains(item.Analysis, "Monthly CO2 Footprint Calculation") {
 				// Try to find the calculation result after "="
@@ -246,15 +247,15 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 			}
 		} else if item.GetResourceType() == ResourceTypeS3 {
 			// For S3, try the standard format
-			if strings.Contains(item.Analysis, "**CO2 Footprint**:") {
-				itemCO2 = extractNumberAfterPhrase(item.Analysis, "**CO2 Footprint**:")
+			if strings.Contains(item.Analysis, "CO2 Footprint:") {
+				itemCO2 = extractNumberAfterPhrase(item.Analysis, "CO2 Footprint:")
 			}
 		}
 
 		// Extract cost
 		var itemCost float64
-		if strings.Contains(item.Analysis, "**Estimated Monthly Cost**:") {
-			costText := item.Analysis[strings.Index(item.Analysis, "**Estimated Monthly Cost**:"):]
+		if strings.Contains(item.Analysis, "Estimated Monthly Cost:") {
+			costText := item.Analysis[strings.Index(item.Analysis, "Estimated Monthly Cost:"):]
 			if strings.Contains(costText, "$") {
 				itemCost = extractNumberAfterPhrase(costText, "$")
 			}
@@ -262,8 +263,8 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 
 		// Extract savings
 		var itemCostSavings float64
-		if strings.Contains(item.Analysis, "**Monthly Savings Potential**:") {
-			savingsText := item.Analysis[strings.Index(item.Analysis, "**Monthly Savings Potential**:"):]
+		if strings.Contains(item.Analysis, "Monthly Savings Potential:") {
+			savingsText := item.Analysis[strings.Index(item.Analysis, "Monthly Savings Potential:"):]
 			if strings.Contains(savingsText, "$") {
 				itemCostSavings = extractNumberAfterPhrase(savingsText, "$")
 			}
@@ -297,22 +298,17 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 	}
 
 	// Carbon metrics with fancy formatting
-	if colorize {
-		fmt.Fprintf(w, "\n%sCARBON FOOTPRINT%s\n", ColorBold, ColorReset)
-		fmt.Fprintf(w, "────────────────\n")
-		fmt.Fprintf(w, "Monthly CO2 Emissions: %s%.2f kg CO2e%s\n",
-			ColorYellow, totalCO2, ColorReset)
-		fmt.Fprintf(w, "Potential CO2 Reduction: %s%.2f kg CO2e%s (%.1f%%)\n",
-			ColorGreen, potentialCO2Savings, ColorReset,
-			safePercentage(potentialCO2Savings, totalCO2))
-	} else {
-		fmt.Fprintf(w, "\nCARBON FOOTPRINT\n")
-		fmt.Fprintf(w, "────────────────\n")
-		fmt.Fprintf(w, "Monthly CO2 Emissions: %.2f kg CO2e\n", totalCO2)
-		fmt.Fprintf(w, "Potential CO2 Reduction: %.2f kg CO2e (%.1f%%)\n",
-			potentialCO2Savings,
-			safePercentage(potentialCO2Savings, totalCO2))
-	}
+	fmt.Fprintln(w)
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	// header
+	fmt.Fprintln(tw, "METRIC\tCURRENT\tPOTENTIAL\tSAVING%")
+	// carbon line
+	fmt.Fprintf(tw, "CO2 Emissions\t%.2f kg CO₂e\t%.2f kg CO₂e\t%.1f%%\n",
+		totalCO2, potentialCO2Savings, safePercentage(potentialCO2Savings, totalCO2))
+	// cost line
+	fmt.Fprintf(tw, "Cost ($)\t%.2f\t%.2f\t%.1f%%\n",
+		totalCost, potentialCostSavings, safePercentage(potentialCostSavings, totalCost))
+	tw.Flush()
 
 	// Environmental equivalents
 	if colorize {
@@ -375,29 +371,6 @@ func printSustainabilitySummary(w io.Writer, report []ReportItem, colorize bool)
 		potentialCostSavings,
 		safePercentage(potentialCostSavings, totalCost))
 	fmt.Fprintf(w, "• Projected annual savings: $%.2f\n", potentialCostSavings*12)
-
-	// Add sustainability tips (replaced with static tips for now)
-	if colorize {
-		fmt.Fprintf(w, "\n%sSUSTAINABILITY TIPS%s\n", ColorBold+ColorGreen, ColorReset)
-		fmt.Fprintf(w, "─────────────────\n")
-	} else {
-		fmt.Fprintf(w, "\nSUSTAINABILITY TIPS\n")
-		fmt.Fprintf(w, "─────────────────\n")
-	}
-
-	// Static tips for demonstration
-	tips := []string{
-		"Right-size EC2 instances with consistently low CPU utilization to match actual workload needs",
-		"Implement lifecycle policies for S3 buckets to transition infrequently accessed data to cheaper storage classes",
-		"Consider using AWS Graviton processors for better energy efficiency and cost savings",
-		"Schedule non-production resources to automatically shut down during off-hours",
-		"Choose AWS regions with lower carbon intensity for new deployments or migrations",
-	}
-
-	// Print the tips
-	for _, tip := range tips {
-		fmt.Fprintf(w, "• %s\n", tip)
-	}
 }
 
 // Helper function to extract numbers from text
@@ -426,7 +399,7 @@ func safePercentage(part, whole float64) float64 {
 	if whole == 0 {
 		return 0
 	}
-	return (part / whole) * 100
+	return 100 - ((part / whole) * 100)
 }
 
 // Utility functions for extracting information from analysis text
@@ -445,8 +418,8 @@ func extractBucketName(analysis string) string {
 	}
 
 	// Look for "Name: BUCKET_NAME" pattern
-	if strings.Contains(analysis, "**Name**:") {
-		parts := strings.Split(analysis, "**Name**:")
+	if strings.Contains(analysis, "Name:") {
+		parts := strings.Split(analysis, "Name:")
 		if len(parts) > 1 {
 			namePart := strings.TrimSpace(parts[1])
 			endPos := strings.Index(namePart, "\n")
@@ -461,8 +434,8 @@ func extractBucketName(analysis string) string {
 
 func extractInstanceID(analysis string) string {
 	// Look for "Instance ID: i-XXXXXXXXXX" pattern
-	if strings.Contains(analysis, "**Instance ID**:") {
-		parts := strings.Split(analysis, "**Instance ID**:")
+	if strings.Contains(analysis, "Instance ID:") {
+		parts := strings.Split(analysis, "Instance ID:")
 		if len(parts) > 1 {
 			idPart := strings.TrimSpace(parts[1])
 			endPos := strings.Index(idPart, "\n")
@@ -473,8 +446,8 @@ func extractInstanceID(analysis string) string {
 	}
 
 	// Look for "ID: i-XXXXXXXXXX" pattern
-	if strings.Contains(analysis, "**ID**:") {
-		parts := strings.Split(analysis, "**ID**:")
+	if strings.Contains(analysis, "ID:") {
+		parts := strings.Split(analysis, "ID:")
 		if len(parts) > 1 {
 			idPart := strings.TrimSpace(parts[1])
 			endPos := strings.Index(idPart, "\n")
@@ -504,8 +477,8 @@ func extractRDSInstanceID(analysis string) string {
 	}
 
 	// Look for "ID: DATABASE_ID" pattern
-	if strings.Contains(analysis, "**ID**:") {
-		parts := strings.Split(analysis, "**ID**:")
+	if strings.Contains(analysis, "ID:") {
+		parts := strings.Split(analysis, "ID:")
 		if len(parts) > 1 {
 			idPart := strings.TrimSpace(parts[1])
 			endPos := strings.Index(idPart, "\n")
@@ -544,171 +517,124 @@ func printHeader(w io.Writer, title string, colorize bool) {
 }
 
 // printEC2Summary prints a summary table of EC2 instances
-func printEC2Summary(w io.Writer, ec2Items []ReportItem, colorize bool) {
-	if len(ec2Items) == 0 {
-		return
-	}
+// func printEC2Summary(w io.Writer, ec2Items []ReportItem, colorize bool) {
+// 	if len(ec2Items) == 0 {
+// 		return
+// 	}
+// 	// Section title
+// 	if colorize {
+// 		fmt.Fprintf(w, "\n%sEC2 INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
+// 	} else {
+// 		fmt.Fprintln(w, "\nEC2 INSTANCES SUMMARY")
+// 	}
+// 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+// 	// Header row
+// 	header := "INSTANCE ID\tTYPE\tCPU AVG (%)\tSTATUS"
+// 	if colorize {
+// 		header = ColorBold + ColorCyan + header + ColorReset
+// 	}
+// 	fmt.Fprintln(tw, header)
 
-	// Print section header
-	if colorize {
-		fmt.Fprintf(w, "\n%sEC2 INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
-		fmt.Fprintln(w, strings.Repeat("-", 22))
-	} else {
-		fmt.Fprintln(w, "\nEC2 INSTANCES SUMMARY")
-		fmt.Fprintln(w, strings.Repeat("-", 22))
-	}
+// 	for _, item := range ec2Items {
+// 		id := item.Instance.InstanceID
+// 		typ := item.Instance.InstanceType
+// 		cpu := fmt.Sprintf("%.1f", item.Instance.CPUAvg7d)
+// 		status := getEfficiencyStatus(item.Instance.CPUAvg7d)
+// 		if colorize {
+// 			switch status {
+// 			case "CRITICAL":
+// 				status = ColorRed + status + ColorReset
+// 			case "WARNING":
+// 				status = ColorYellow + status + ColorReset
+// 			case "GOOD":
+// 				status = ColorGreen + status + ColorReset
+// 			}
+// 		}
+// 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", id, typ, cpu, status)
+// 	}
+// 	tw.Flush()
+// }
 
-	// Print table header
-	headers := []string{"INSTANCE ID", "TYPE", "CPU AVG", "STATUS"}
-	fmt.Fprintf(w, "%-20s %-10s %-10s %-15s\n", headers[0], headers[1], headers[2], headers[3])
-	fmt.Fprintln(w, strings.Repeat("-", 60))
+// // printS3Summary prints a summary table of S3 buckets
+// func printS3Summary(w io.Writer, s3Items []ReportItem, colorize bool) {
+// 	if len(s3Items) == 0 {
+// 		return
+// 	}
+// 	if colorize {
+// 		fmt.Fprintf(w, "\n%sS3 BUCKETS SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
+// 	} else {
+// 		fmt.Fprintln(w, "\nS3 BUCKETS SUMMARY")
+// 	}
+// 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+// 	header := "BUCKET NAME\tSIZE (GB)\tOBJECTS\tLIFECYCLE"
+// 	if colorize {
+// 		header = ColorBold + ColorCyan + header + ColorReset
+// 	}
+// 	fmt.Fprintln(tw, header)
 
-	// Print table rows - only for valid EC2 instances
-	for _, item := range ec2Items {
-		if item.Instance.InstanceID == "" {
-			continue // Skip entries without an instance ID
-		}
+// 	for _, item := range s3Items {
+// 		b := item.S3Bucket
+// 		name := b.BucketName
+// 		sizeGB := fmt.Sprintf("%.2f", float64(b.SizeBytes)/(1024*1024*1024))
+// 		objs := fmt.Sprintf("%d", b.ObjectCount)
+// 		lifecycle := "MISSING"
+// 		if len(b.LifecycleRules) > 0 {
+// 			lifecycle = "CONFIGURED"
+// 		}
+// 		if colorize {
+// 			switch lifecycle {
+// 			case "MISSING":
+// 				lifecycle = ColorRed + lifecycle + ColorReset
+// 			case "CONFIGURED":
+// 				lifecycle = ColorGreen + lifecycle + ColorReset
+// 			default:
+// 				lifecycle = ColorYellow + lifecycle + ColorReset
+// 			}
+// 		}
+// 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, sizeGB, objs, lifecycle)
+// 	}
+// 	tw.Flush()
+// }
 
-		status := getEfficiencyStatus(item.Instance.CPUAvg7d)
-		statusText := status
+// // printRDSSummary prints a summary table of RDS instances
+// func printRDSSummary(w io.Writer, rdsItems []ReportItem, colorize bool) {
+// 	if len(rdsItems) == 0 {
+// 		return
+// 	}
+// 	if colorize {
+// 		fmt.Fprintf(w, "\n%sRDS INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
+// 	} else {
+// 		fmt.Fprintln(w, "\nRDS INSTANCES SUMMARY")
+// 	}
+// 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+// 	header := "INSTANCE ID\tTYPE\tENGINE\tCPU AVG (%)\tSTORAGE USED (%)\tSTATUS"
+// 	if colorize {
+// 		header = ColorBold + ColorCyan + header + ColorReset
+// 	}
+// 	fmt.Fprintln(tw, header)
 
-		if colorize {
-			switch status {
-			case "CRITICAL":
-				statusText = ColorRed + status + ColorReset
-			case "WARNING":
-				statusText = ColorYellow + status + ColorReset
-			case "GOOD":
-				statusText = ColorGreen + status + ColorReset
-			}
-		}
-
-		fmt.Fprintf(w, "%-20s %-10s %-10.1f%% %-15s\n",
-			item.Instance.InstanceID,
-			item.Instance.InstanceType,
-			item.Instance.CPUAvg7d,
-			statusText)
-	}
-	fmt.Fprintln(w)
-}
-
-// printS3Summary prints a summary table of S3 buckets
-func printS3Summary(w io.Writer, s3Items []ReportItem, colorize bool) {
-	if len(s3Items) == 0 {
-		return
-	}
-
-	// Print section header
-	if colorize {
-		fmt.Fprintf(w, "\n%sS3 BUCKETS SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
-		fmt.Fprintln(w, strings.Repeat("-", 18))
-	} else {
-		fmt.Fprintln(w, "\nS3 BUCKETS SUMMARY")
-		fmt.Fprintln(w, strings.Repeat("-", 18))
-	}
-
-	// Print table header
-	headers := []string{"BUCKET NAME", "SIZE (GB)", "OBJECTS", "LIFECYCLE"}
-	fmt.Fprintf(w, "%-30s %-10s %-10s %-15s\n", headers[0], headers[1], headers[2], headers[3])
-	fmt.Fprintln(w, strings.Repeat("-", 70))
-
-	// Print table rows - only for valid S3 buckets
-	for _, item := range s3Items {
-		if item.S3Bucket.BucketName == "" {
-			continue // Skip entries without a bucket name
-		}
-
-		// Determine lifecycle status
-		lifecycleStatus := "MISSING"
-		if len(item.S3Bucket.LifecycleRules) > 0 {
-			hasEnabledRules := false
-			for _, rule := range item.S3Bucket.LifecycleRules {
-				if rule.Status == "Enabled" {
-					hasEnabledRules = true
-					break
-				}
-			}
-
-			if hasEnabledRules {
-				lifecycleStatus = "CONFIGURED"
-			} else {
-				lifecycleStatus = "DISABLED"
-			}
-		}
-
-		statusText := lifecycleStatus
-
-		if colorize {
-			switch lifecycleStatus {
-			case "MISSING":
-				statusText = ColorRed + statusText + ColorReset
-			case "DISABLED":
-				statusText = ColorYellow + statusText + ColorReset
-			case "CONFIGURED":
-				statusText = ColorGreen + statusText + ColorReset
-			}
-		}
-
-		fmt.Fprintf(w, "%-30s %-10.2f %-10d %-15s\n",
-			item.S3Bucket.BucketName,
-			float64(item.S3Bucket.SizeBytes)/(1024*1024*1024),
-			item.S3Bucket.ObjectCount,
-			statusText)
-	}
-	fmt.Fprintln(w)
-}
-
-// printRDSSummary prints a summary table of RDS instances
-func printRDSSummary(w io.Writer, rdsItems []ReportItem, colorize bool) {
-	if len(rdsItems) == 0 {
-		return
-	}
-
-	// Print section header
-	if colorize {
-		fmt.Fprintf(w, "\n%sRDS INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
-		fmt.Fprintln(w, strings.Repeat("-", 22))
-	} else {
-		fmt.Fprintln(w, "\nRDS INSTANCES SUMMARY")
-		fmt.Fprintln(w, strings.Repeat("-", 22))
-	}
-
-	// Print table header
-	headers := []string{"INSTANCE ID", "TYPE", "ENGINE", "CPU AVG", "STORAGE USED", "STATUS"}
-	fmt.Fprintf(w, "%-20s %-15s %-15s %-10s %-15s %-10s\n",
-		headers[0], headers[1], headers[2], headers[3], headers[4], headers[5])
-	fmt.Fprintln(w, strings.Repeat("-", 90))
-
-	// Print table rows - only for valid RDS instances
-	for _, item := range rdsItems {
-		if item.RDSInstance.InstanceID == "" {
-			continue // Skip entries without an instance ID
-		}
-
-		status := getRDSEfficiencyStatus(item.RDSInstance.CPUAvg7d)
-		statusText := status
-
-		if colorize {
-			switch status {
-			case "CRITICAL":
-				statusText = ColorRed + status + ColorReset
-			case "WARNING":
-				statusText = ColorYellow + status + ColorReset
-			case "GOOD":
-				statusText = ColorGreen + status + ColorReset
-			}
-		}
-
-		fmt.Fprintf(w, "%-20s %-15s %-15s %-10.1f%% %-15.1f%% %-10s\n",
-			item.RDSInstance.InstanceID,
-			item.RDSInstance.InstanceType,
-			item.RDSInstance.Engine,
-			item.RDSInstance.CPUAvg7d,
-			item.RDSInstance.StorageUsed,
-			statusText)
-	}
-	fmt.Fprintln(w)
-}
+// 	for _, item := range rdsItems {
+// 		r := item.RDSInstance
+// 		id := r.InstanceID
+// 		typ := r.InstanceType
+// 		engine := r.Engine
+// 		cpu := fmt.Sprintf("%.1f", r.CPUAvg7d)
+// 		storage := fmt.Sprintf("%.1f", r.StorageUsed)
+// 		status := getRDSEfficiencyStatus(r.CPUAvg7d)
+// 		if colorize {
+// 			switch status {
+// 			case "CRITICAL":
+// 				status = ColorRed + status + ColorReset
+// 			case "WARNING":
+// 				status = ColorYellow + status + ColorReset
+// 			case "GOOD":
+// 				status = ColorGreen + status + ColorReset
+// 			}
+// 		}
+// 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", id, typ, engine, cpu, storage, status)
+// 	}
+// 	tw.Flush()
+// }
 
 // Print EC2 details section header
 func printEC2DetailsHeader(w io.Writer, colorize bool) {
@@ -743,14 +669,13 @@ func printRDSDetailsHeader(w io.Writer, colorize bool) {
 	}
 }
 
-// printEC2Details prints detailed analysis for an EC2 instance
+// printEC2Details prints detailed analysis for an EC2 instance with coloring
 func printEC2Details(w io.Writer, index int, item ReportItem, colorize bool) {
-	// Section header
+	// Section header (already colored in previous step)
 	instanceType := item.Instance.InstanceType
 	if instanceType == "" {
 		instanceType = "unknown"
 	}
-
 	title := fmt.Sprintf("Instance %d: %s (%s)", index, item.Instance.InstanceID, instanceType)
 	if colorize {
 		fmt.Fprintf(w, "\n%s%s%s\n", ColorBold+ColorBlue, title, ColorReset)
@@ -760,29 +685,44 @@ func printEC2Details(w io.Writer, index int, item ReportItem, colorize bool) {
 		fmt.Fprintln(w, strings.Repeat("-", len(title)))
 	}
 
-	// Instance metadata - only print if we have actual data
-	if !item.Instance.LaunchTime.IsZero() {
-		fmt.Fprintf(w, "Launch Time: %s\n", item.Instance.LaunchTime.Format(time.RFC3339))
+	// --- Apply coloring to labels ---
+	labelColor := ""
+	reset := ""
+	bold := ""
+	if colorize {
+		labelColor = ColorCyan
+		reset = ColorReset
+		bold = ColorBold
 	}
 
-	fmt.Fprintf(w, "CPU Utilization (7-day avg): %.1f%%\n", item.Instance.CPUAvg7d)
+	// Instance metadata
+	if !item.Instance.LaunchTime.IsZero() {
+		fmt.Fprintf(w, "%sLaunch Time:%s %s\n", labelColor, reset, item.Instance.LaunchTime.Format(time.RFC3339))
+	}
+	fmt.Fprintf(w, "%sCPU Utilization (7-day avg):%s %.1f%%\n", labelColor, reset, item.Instance.CPUAvg7d)
 
 	// Tags
 	if len(item.Instance.Tags) > 0 {
-		fmt.Fprintln(w, "Tags:")
-		for k, v := range item.Instance.Tags {
-			fmt.Fprintf(w, "  %s: %s\n", k, v)
+		fmt.Fprintf(w, "%sTags:%s\n", bold+labelColor, reset) // Bold and color the label
+		// Sort tags for consistent output
+		keys := make([]string, 0, len(item.Instance.Tags))
+		for k := range item.Instance.Tags {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(w, "  %s%s:%s %s\n", labelColor, k, reset, item.Instance.Tags[k]) // Color the key
 		}
 	}
 
-	// Analysis (keep original formatting)
-	fmt.Fprintln(w, "\nANALYSIS:")
-	fmt.Fprintln(w, item.Analysis)
+	// Analysis
+	fmt.Fprintf(w, "\n%sAI ANALYSIS:%s\n", bold+labelColor, reset) // Bold and color the label
+	fmt.Fprintln(w, item.Analysis)                                 // Print analysis content as is
 }
 
-// printS3Details prints detailed analysis for an S3 bucket
+// printS3Details prints detailed analysis for an S3 bucket with coloring
 func printS3Details(w io.Writer, index int, item ReportItem, colorize bool) {
-	// Section header
+	// Section header (already colored)
 	title := fmt.Sprintf("Bucket %d: %s", index, item.S3Bucket.BucketName)
 	if colorize {
 		fmt.Fprintf(w, "\n%s%s%s\n", ColorBold+ColorBlue, title, ColorReset)
@@ -792,86 +732,127 @@ func printS3Details(w io.Writer, index int, item ReportItem, colorize bool) {
 		fmt.Fprintln(w, strings.Repeat("-", len(title)))
 	}
 
-	// Bucket metadata - only print if we have actual data
+	// --- Apply coloring to labels ---
+	labelColor := ""
+	reset := ""
+	bold := ""
+	if colorize {
+		labelColor = ColorCyan
+		reset = ColorReset
+		bold = ColorBold
+	}
+
+	// Bucket metadata
 	if item.S3Bucket.Region != "" {
-		fmt.Fprintf(w, "Region: %s\n", item.S3Bucket.Region)
+		fmt.Fprintf(w, "%sRegion:%s %s\n", labelColor, reset, item.S3Bucket.Region)
 	}
-
 	if !item.S3Bucket.CreationDate.IsZero() {
-		fmt.Fprintf(w, "Creation Date: %s\n", item.S3Bucket.CreationDate.Format(time.RFC3339))
+		fmt.Fprintf(w, "%sCreation Date:%s %s\n", labelColor, reset, item.S3Bucket.CreationDate.Format(time.RFC3339))
 	}
-
-	fmt.Fprintf(w, "Size: %.2f GB\n", float64(item.S3Bucket.SizeBytes)/(1024*1024*1024))
-	fmt.Fprintf(w, "Object Count: %d\n", item.S3Bucket.ObjectCount)
-
-	// Last modified time if available
+	fmt.Fprintf(w, "%sSize:%s %.2f GB\n", labelColor, reset, float64(item.S3Bucket.SizeBytes)/(1024*1024*1024))
+	fmt.Fprintf(w, "%sObject Count:%s %d\n", labelColor, reset, item.S3Bucket.ObjectCount)
 	if !item.S3Bucket.LastModified.IsZero() {
-		fmt.Fprintf(w, "Last Modified: %s\n", item.S3Bucket.LastModified.Format(time.RFC3339))
+		fmt.Fprintf(w, "%sLast Modified:%s %s\n", labelColor, reset, item.S3Bucket.LastModified.Format(time.RFC3339))
 	}
 
 	// Storage class breakdown
 	if len(item.S3Bucket.StorageClasses) > 0 {
-		fmt.Fprintln(w, "\nStorage Classes:")
-		for class, size := range item.S3Bucket.StorageClasses {
+		fmt.Fprintf(w, "\n%sStorage Classes:%s\n", bold+labelColor, reset) // Bold and color label
+		// Sort classes for consistent output
+		classes := make([]string, 0, len(item.S3Bucket.StorageClasses))
+		for c := range item.S3Bucket.StorageClasses {
+			classes = append(classes, c)
+		}
+		sort.Strings(classes)
+		for _, class := range classes {
+			size := item.S3Bucket.StorageClasses[class]
 			percentage := 0.0
 			if item.S3Bucket.SizeBytes > 0 {
 				percentage = float64(size) / float64(item.S3Bucket.SizeBytes) * 100
 			}
-			fmt.Fprintf(w, "  %s: %.2f GB (%.1f%%)\n",
-				class, float64(size)/(1024*1024*1024), percentage)
+			fmt.Fprintf(w, "  %s%s:%s %.2f GB (%.1f%%)\n",
+				labelColor, class, reset, // Color the class name
+				float64(size)/(1024*1024*1024), percentage)
 		}
 	}
 
 	// Access patterns
 	if len(item.S3Bucket.AccessFrequency) > 0 {
-		fmt.Fprintln(w, "\nAccess Patterns (daily average):")
-		for op, count := range item.S3Bucket.AccessFrequency {
-			fmt.Fprintf(w, "  %s: %.1f\n", op, count)
+		fmt.Fprintf(w, "\n%sAccess Patterns (daily average):%s\n", bold+labelColor, reset) // Bold and color label
+		// Sort operations for consistent output
+		ops := make([]string, 0, len(item.S3Bucket.AccessFrequency))
+		for op := range item.S3Bucket.AccessFrequency {
+			ops = append(ops, op)
+		}
+		sort.Strings(ops)
+		for _, op := range ops {
+			count := item.S3Bucket.AccessFrequency[op]
+			fmt.Fprintf(w, "  %s%s:%s %.1f\n", labelColor, op, reset, count) // Color the operation name
 		}
 	}
 
 	// Lifecycle rules
+	fmt.Fprintf(w, "\n%sLifecycle Rules:%s ", bold+labelColor, reset) // Bold and color label (note the space at the end)
 	if len(item.S3Bucket.LifecycleRules) > 0 {
-		fmt.Fprintln(w, "\nLifecycle Rules:")
-		for _, rule := range item.S3Bucket.LifecycleRules {
+		fmt.Fprintln(w) // Newline after the label if rules exist
+		// Sort rules by ID for consistent output
+		rules := item.S3Bucket.LifecycleRules
+		sort.Slice(rules, func(i, j int) bool {
+			return rules[i].ID < rules[j].ID
+		})
+		for _, rule := range rules {
 			ruleStatus := "Disabled"
+			statusColor := ColorYellow // Default to yellow for disabled
 			if rule.Status == "Enabled" {
 				ruleStatus = "Enabled"
+				statusColor = ColorGreen
 			}
+			if !colorize {
+				statusColor = ""
+			} // Clear color if not colorizing
 
-			fmt.Fprintf(w, "  Rule '%s' (%s): ", rule.ID, ruleStatus)
+			fmt.Fprintf(w, "  %sRule '%s'%s (%s%s%s): ", labelColor, rule.ID, reset, statusColor, ruleStatus, reset)
 
 			if rule.HasTransitions {
 				fmt.Fprintf(w, "Transitions at %d days", rule.ObjectAgeThreshold)
 			} else {
 				fmt.Fprintf(w, "No transitions")
 			}
-
 			if rule.HasExpirations {
-				fmt.Fprintf(w, ", Expires at %d days", rule.ObjectAgeThreshold)
+				// Add comma only if transitions were mentioned
+				if rule.HasTransitions {
+					fmt.Fprint(w, ",")
+				}
+				fmt.Fprintf(w, " Expires at %d days", rule.ObjectAgeThreshold)
 			}
 			fmt.Fprintln(w)
 		}
 	} else {
-		fmt.Fprintln(w, "\nLifecycle Rules: None configured")
+		fmt.Fprintln(w, "None configured") // Print on the same line as the label if none
 	}
 
 	// Tags
 	if len(item.S3Bucket.Tags) > 0 {
-		fmt.Fprintln(w, "\nTags:")
-		for k, v := range item.S3Bucket.Tags {
-			fmt.Fprintf(w, "  %s: %s\n", k, v)
+		fmt.Fprintf(w, "\n%sTags:%s\n", bold+labelColor, reset) // Bold and color the label
+		// Sort tags for consistent output
+		keys := make([]string, 0, len(item.S3Bucket.Tags))
+		for k := range item.S3Bucket.Tags {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(w, "  %s%s:%s %s\n", labelColor, k, reset, item.S3Bucket.Tags[k]) // Color the key
 		}
 	}
 
-	// Analysis (keep original formatting)
-	fmt.Fprintln(w, "\nANALYSIS:")
-	fmt.Fprintln(w, item.Analysis)
+	// Analysis
+	fmt.Fprintf(w, "\n%sAI ANALYSIS:%s\n", bold+labelColor, reset) // Bold and color the label
+	fmt.Fprintln(w, item.Analysis)                                 // Print analysis content as is
 }
 
-// printRDSDetails prints detailed analysis for an RDS instance
+// printRDSDetails prints detailed analysis for an RDS instance with coloring
 func printRDSDetails(w io.Writer, index int, item ReportItem, colorize bool) {
-	// Section header
+	// Section header (already colored)
 	title := fmt.Sprintf("RDS Instance %d: %s (%s)", index, item.RDSInstance.InstanceID, item.RDSInstance.InstanceType)
 	if colorize {
 		fmt.Fprintf(w, "\n%s%s%s\n", ColorBold+ColorBlue, title, ColorReset)
@@ -881,31 +862,45 @@ func printRDSDetails(w io.Writer, index int, item ReportItem, colorize bool) {
 		fmt.Fprintln(w, strings.Repeat("-", len(title)))
 	}
 
-	// Instance metadata
-	fmt.Fprintf(w, "Engine: %s %s\n", item.RDSInstance.Engine, item.RDSInstance.EngineVersion)
-	fmt.Fprintf(w, "Storage: %d GB (%s)\n", item.RDSInstance.AllocatedStorage, item.RDSInstance.StorageType)
-	fmt.Fprintf(w, "Multi-AZ: %t\n", item.RDSInstance.MultiAZ)
-
-	if !item.RDSInstance.LaunchTime.IsZero() {
-		fmt.Fprintf(w, "Launch Time: %s\n", item.RDSInstance.LaunchTime.Format(time.RFC3339))
+	// --- Apply coloring to labels ---
+	labelColor := ""
+	reset := ""
+	bold := ""
+	if colorize {
+		labelColor = ColorCyan
+		reset = ColorReset
+		bold = ColorBold
 	}
 
-	fmt.Fprintf(w, "CPU Utilization (7-day avg): %.1f%%\n", item.RDSInstance.CPUAvg7d)
-	fmt.Fprintf(w, "Storage Used: %.1f%%\n", item.RDSInstance.StorageUsed)
-	fmt.Fprintf(w, "Connections (7-day avg): %.1f\n", item.RDSInstance.ConnectionsAvg7d)
-	fmt.Fprintf(w, "IOPS (7-day avg): %.1f\n", item.RDSInstance.IOPSAvg7d)
+	// Instance metadata
+	fmt.Fprintf(w, "%sEngine:%s %s %s\n", labelColor, reset, item.RDSInstance.Engine, item.RDSInstance.EngineVersion)
+	fmt.Fprintf(w, "%sStorage:%s %d GB (%s)\n", labelColor, reset, item.RDSInstance.AllocatedStorage, item.RDSInstance.StorageType)
+	fmt.Fprintf(w, "%sMulti-AZ:%s %t\n", labelColor, reset, item.RDSInstance.MultiAZ)
+	if !item.RDSInstance.LaunchTime.IsZero() {
+		fmt.Fprintf(w, "%sLaunch Time:%s %s\n", labelColor, reset, item.RDSInstance.LaunchTime.Format(time.RFC3339))
+	}
+	fmt.Fprintf(w, "%sCPU Utilization (7-day avg):%s %.1f%%\n", labelColor, reset, item.RDSInstance.CPUAvg7d)
+	fmt.Fprintf(w, "%sStorage Used:%s %.1f%%\n", labelColor, reset, item.RDSInstance.StorageUsed)
+	fmt.Fprintf(w, "%sConnections (7-day avg):%s %.1f\n", labelColor, reset, item.RDSInstance.ConnectionsAvg7d)
+	fmt.Fprintf(w, "%sIOPS (7-day avg):%s %.1f\n", labelColor, reset, item.RDSInstance.IOPSAvg7d)
 
 	// Tags
 	if len(item.RDSInstance.Tags) > 0 {
-		fmt.Fprintln(w, "Tags:")
-		for k, v := range item.RDSInstance.Tags {
-			fmt.Fprintf(w, "  %s: %s\n", k, v)
+		fmt.Fprintf(w, "%sTags:%s\n", bold+labelColor, reset) // Bold and color the label
+		// Sort tags for consistent output
+		keys := make([]string, 0, len(item.RDSInstance.Tags))
+		for k := range item.RDSInstance.Tags {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(w, "  %s%s:%s %s\n", labelColor, k, reset, item.RDSInstance.Tags[k]) // Color the key
 		}
 	}
 
-	// Analysis (keep original formatting)
-	fmt.Fprintln(w, "\nANALYSIS:")
-	fmt.Fprintln(w, item.Analysis)
+	// Analysis
+	fmt.Fprintf(w, "\n%sAI ANALYSIS:%s\n", bold+labelColor, reset) // Bold and color the label
+	fmt.Fprintln(w, item.Analysis)                                 // Print analysis content as is
 }
 
 // getEfficiencyStatus returns a status based on CPU utilization
