@@ -116,9 +116,10 @@ func processEC2Instance(
 	if err != nil {
 		// Still mark as completed but with error in analysis
 		reportItem := pkg.ReportItem{
-			Instance:  instance,
-			Embedding: emb,
-			Analysis:  fmt.Sprintf("ERROR: Failed to analyze instance: %v", err),
+			ResourceType: pkg.ResourceTypeEC2, // Explicitly set the resource type
+			Instance:     instance,
+			Embedding:    emb,
+			Analysis:     fmt.Sprintf("ERROR: Failed to analyze instance: %v", err),
 		}
 		updateError := pkg.UpdateJobProgress(ctx, dynamoClient, workItem.JobID, true, reportItem)
 		if updateError != nil {
@@ -129,9 +130,10 @@ func processEC2Instance(
 
 	// Success - update job progress with result
 	reportItem := pkg.ReportItem{
-		Instance:  instance,
-		Embedding: emb,
-		Analysis:  analysis,
+		ResourceType: pkg.ResourceTypeEC2, // Explicitly set the resource type
+		Instance:     instance,
+		Embedding:    emb,
+		Analysis:     analysis,
 	}
 	err = pkg.UpdateJobProgress(ctx, dynamoClient, workItem.JobID, true, reportItem)
 	if err != nil {
@@ -282,9 +284,10 @@ func processS3Bucket(
 
 	// Success - update job progress with result, even if analysis had issues
 	reportItem := pkg.ReportItem{
-		S3Bucket:  bucket,
-		Embedding: emb,
-		Analysis:  analysis,
+		ResourceType: pkg.ResourceTypeS3, // IMPORTANT: Explicitly set the resource type
+		S3Bucket:     bucket,
+		Embedding:    emb,
+		Analysis:     analysis,
 	}
 
 	err = pkg.UpdateJobProgress(ctx, dynamoClient, workItem.JobID, true, reportItem)

@@ -1,7 +1,7 @@
 .PHONY: build clean deploy
 
 # Build both Lambda functions
-build: build-api build-worker
+build: build-api build-worker build-cli
 
 # Build the API Lambda
 build-api:
@@ -20,6 +20,10 @@ build-worker:
 	  -o bootstrap \
 	  ./cmd/worker/main.go
 	zip -j worker.zip bootstrap
+
+build-cli:
+	@echo "Building CLI..."
+	go build -o greenops ./cmd/cli/main.go 
 
 # Clean build artifacts
 clean:
