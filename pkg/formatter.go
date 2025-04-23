@@ -21,7 +21,6 @@ const (
 	ColorBold    = "\033[1m"
 )
 
-// FormatAnalysisReport prints the analysis results in a user-friendly format
 func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	// Header
 	printHeader(w, "GreenOps Analysis Report", colorize)
@@ -30,16 +29,15 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	// Count resource types
 	ec2Count := 0
 	s3Count := 0
-
 	for _, item := range report {
-		if !IsEmpty(item.Instance) {
+		if item.Instance.InstanceID != "" {
 			ec2Count++
-		} else if !IsEmpty(item.S3Bucket) {
+		} else if item.S3Bucket.BucketName != "" {
 			s3Count++
 		}
 	}
 
-	// Print summary of analyzed resources
+	// Summary
 	if ec2Count > 0 {
 		fmt.Fprintf(w, "EC2 instances analyzed: %d\n", ec2Count)
 	}
@@ -48,21 +46,33 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	}
 	fmt.Fprintf(w, "Total resources analyzed: %d\n\n", len(report))
 
-	// Process EC2 instances first, if any
+	// EC2 summary
 	if ec2Count > 0 {
 		printEC2Summary(w, report, colorize)
 	}
 
-	// Process S3 buckets next, if any
+	// S3 summary
 	if s3Count > 0 {
 		printS3Summary(w, report, colorize)
 	}
 
-	// Detailed analysis for each resource
-	for i, item := range report {
-		if !IsEmpty(item.Instance) {
+	// Detailed analysis: EC2 first, then S3
+	var ordered []ReportItem
+	for _, item := range report {
+		if item.Instance.InstanceID != "" {
+			ordered = append(ordered, item)
+		}
+	}
+	for _, item := range report {
+		if item.S3Bucket.BucketName != "" {
+			ordered = append(ordered, item)
+		}
+	}
+
+	for i, item := range ordered {
+		if item.Instance.InstanceID != "" {
 			printInstanceAnalysis(w, i+1, item, colorize)
-		} else if !IsEmpty(item.S3Bucket) {
+		} else if item.S3Bucket.BucketName != "" {
 			printS3BucketAnalysis(w, i+1, item, colorize)
 		}
 	}
@@ -70,7 +80,6 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 
 // IsEmpty checks if a struct is empty
 func IsEmpty(obj interface{}) bool {
-	// Simple check - this would need to be more robust in production
 	jsonData, err := json.Marshal(obj)
 	if err != nil {
 		return true
@@ -90,19 +99,15 @@ func printHeader(w io.Writer, title string, colorize bool) {
 
 // printEC2Summary prints a summary table of EC2 instances
 func printEC2Summary(w io.Writer, report []ReportItem, colorize bool) {
-	// Collect just EC2 instances
 	var ec2Items []ReportItem
 	for _, item := range report {
-		if !IsEmpty(item.Instance) {
+		if item.Instance.InstanceID != "" {
 			ec2Items = append(ec2Items, item)
 		}
 	}
-
 	if len(ec2Items) == 0 {
 		return
 	}
-
-	// Print section header
 	if colorize {
 		fmt.Fprintf(w, "\n%sEC2 INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
 		fmt.Fprintln(w, strings.Repeat("-", 22))
@@ -110,17 +115,12 @@ func printEC2Summary(w io.Writer, report []ReportItem, colorize bool) {
 		fmt.Fprintln(w, "\nEC2 INSTANCES SUMMARY")
 		fmt.Fprintln(w, strings.Repeat("-", 22))
 	}
-
-	// Print table header
 	headers := []string{"INSTANCE ID", "TYPE", "CPU AVG", "STATUS"}
 	fmt.Fprintf(w, "%-15s %-10s %-10s %-15s\n", headers[0], headers[1], headers[2], headers[3])
 	fmt.Fprintln(w, strings.Repeat("-", 55))
-
-	// Print table rows
 	for _, item := range ec2Items {
 		status := getEfficiencyStatus(item.Instance.CPUAvg7d)
 		statusText := status
-
 		if colorize {
 			switch status {
 			case "CRITICAL":
@@ -131,7 +131,6 @@ func printEC2Summary(w io.Writer, report []ReportItem, colorize bool) {
 				statusText = ColorGreen + status + ColorReset
 			}
 		}
-
 		fmt.Fprintf(w, "%-15s %-10s %-10.1f%% %-15s\n",
 			item.Instance.InstanceID,
 			item.Instance.InstanceType,
@@ -143,19 +142,15 @@ func printEC2Summary(w io.Writer, report []ReportItem, colorize bool) {
 
 // printS3Summary prints a summary table of S3 buckets
 func printS3Summary(w io.Writer, report []ReportItem, colorize bool) {
-	// Collect just S3 buckets
 	var s3Items []ReportItem
 	for _, item := range report {
-		if !IsEmpty(item.S3Bucket) {
+		if item.S3Bucket.BucketName != "" {
 			s3Items = append(s3Items, item)
 		}
 	}
-
 	if len(s3Items) == 0 {
 		return
 	}
-
-	// Print section header
 	if colorize {
 		fmt.Fprintf(w, "\n%sS3 BUCKETS SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
 		fmt.Fprintln(w, strings.Repeat("-", 18))
@@ -163,45 +158,36 @@ func printS3Summary(w io.Writer, report []ReportItem, colorize bool) {
 		fmt.Fprintln(w, "\nS3 BUCKETS SUMMARY")
 		fmt.Fprintln(w, strings.Repeat("-", 18))
 	}
-
-	// Print table header
 	headers := []string{"BUCKET NAME", "SIZE (GB)", "OBJECTS", "LIFECYCLE"}
 	fmt.Fprintf(w, "%-30s %-10s %-10s %-15s\n", headers[0], headers[1], headers[2], headers[3])
 	fmt.Fprintln(w, strings.Repeat("-", 70))
-
-	// Print table rows
 	for _, item := range s3Items {
-		// Determine lifecycle status
-		lifecycleStatus := "MISSING"
+		expStatus := "MISSING"
 		if len(item.S3Bucket.LifecycleRules) > 0 {
-			hasEnabledRules := false
-			for _, rule := range item.S3Bucket.LifecycleRules {
-				if rule.Status == "Enabled" {
-					hasEnabledRules = true
+			has := false
+			for _, r := range item.S3Bucket.LifecycleRules {
+				if r.Status == "Enabled" {
+					has = true
 					break
 				}
 			}
-
-			if hasEnabledRules {
-				lifecycleStatus = "CONFIGURED"
+			if has {
+				expStatus = "CONFIGURED"
 			} else {
-				lifecycleStatus = "DISABLED"
+				expStatus = "DISABLED"
 			}
 		}
-
-		statusText := lifecycleStatus
-
+		statusText := expStatus
 		if colorize {
-			switch lifecycleStatus {
+			switch expStatus {
 			case "MISSING":
-				statusText = ColorRed + statusText + ColorReset
+				statusText = ColorRed + expStatus + ColorReset
 			case "DISABLED":
-				statusText = ColorYellow + statusText + ColorReset
+				statusText = ColorYellow + expStatus + ColorReset
 			case "CONFIGURED":
-				statusText = ColorGreen + statusText + ColorReset
+				statusText = ColorGreen + expStatus + ColorReset
 			}
 		}
-
 		fmt.Fprintf(w, "%-30s %-10.2f %-10d %-15s\n",
 			item.S3Bucket.BucketName,
 			float64(item.S3Bucket.SizeBytes)/(1024*1024*1024),
