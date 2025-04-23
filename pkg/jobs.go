@@ -46,12 +46,13 @@ type JobInfo struct {
 
 // WorkItem represents a single task to be processed
 type WorkItem struct {
-	JobID     string   `json:"job_id"`
-	ItemIndex int      `json:"item_index"`
-	ItemType  string   `json:"item_type"`
-	Instance  Instance `json:"instance,omitempty"`
-	S3Bucket  S3Bucket `json:"s3_bucket,omitempty"`
-	// Add other resource types here later (S3, RDS, etc.)
+	JobID       string      `json:"job_id"`
+	ItemIndex   int         `json:"item_index"`
+	ItemType    string      `json:"item_type"`
+	Instance    Instance    `json:"instance,omitempty"`
+	S3Bucket    S3Bucket    `json:"s3_bucket,omitempty"`
+	RDSInstance RDSInstance `json:"rds_instance,omitempty"`
+	// Add other resource types here later (EBS, etc.)
 }
 
 // CreateJob creates a new job record in DynamoDB

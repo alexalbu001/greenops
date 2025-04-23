@@ -31,10 +31,12 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	// Pre-process and separate resources by type
 	var ec2Items []ReportItem
 	var s3Items []ReportItem
+	var rdsItems []ReportItem
 
 	// Debug counter for validating resources
 	ec2Count := 0
 	s3Count := 0
+	rdsCount := 0
 	unknownCount := 0
 
 	// Explicitly separate resources by type
@@ -51,6 +53,11 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 			s3Count++
 			if !isEmptyStruct(item.S3Bucket) && item.S3Bucket.BucketName != "" {
 				s3Items = append(s3Items, item)
+			}
+		} else if resourceType == ResourceTypeRDS {
+			rdsCount++
+			if !isEmptyStruct(item.RDSInstance) && item.RDSInstance.InstanceID != "" {
+				rdsItems = append(rdsItems, item)
 			}
 		} else {
 			unknownCount++
@@ -69,7 +76,8 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 					if bucketName != "" {
 						newItem := item
 						newItem.S3Bucket = s3Bucket
-						newItem.Instance = Instance{} // Clear instance data
+						newItem.Instance = Instance{}       // Clear instance data
+						newItem.RDSInstance = RDSInstance{} // Clear RDS data
 						s3Items = append(s3Items, newItem)
 						s3Count++
 					}
@@ -85,9 +93,26 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 
 					newItem := item
 					newItem.Instance = instance
-					newItem.S3Bucket = S3Bucket{} // Clear bucket data
+					newItem.S3Bucket = S3Bucket{}       // Clear bucket data
+					newItem.RDSInstance = RDSInstance{} // Clear RDS data
 					ec2Items = append(ec2Items, newItem)
 					ec2Count++
+				}
+			} else if strings.Contains(item.Analysis, "RDS Instance Analysis") {
+				// Extract instance ID from analysis if possible
+				instanceID := extractRDSInstanceID(item.Analysis)
+				if instanceID != "" {
+					// Create proper RDS Instance structure
+					rdsInstance := RDSInstance{
+						InstanceID: instanceID,
+					}
+
+					newItem := item
+					newItem.RDSInstance = rdsInstance
+					newItem.Instance = Instance{} // Clear EC2 data
+					newItem.S3Bucket = S3Bucket{} // Clear S3 data
+					rdsItems = append(rdsItems, newItem)
+					rdsCount++
 				}
 			}
 		}
@@ -96,6 +121,8 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	// Print resource counts
 	ec2DisplayCount := len(ec2Items)
 	s3DisplayCount := len(s3Items)
+	rdsDisplayCount := len(rdsItems)
+	totalCount := ec2DisplayCount + s3DisplayCount + rdsDisplayCount
 
 	if ec2DisplayCount > 0 {
 		fmt.Fprintf(w, "EC2 instances analyzed: %d\n", ec2DisplayCount)
@@ -103,7 +130,10 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	if s3DisplayCount > 0 {
 		fmt.Fprintf(w, "S3 buckets analyzed: %d\n", s3DisplayCount)
 	}
-	fmt.Fprintf(w, "Total resources analyzed: %d\n", ec2DisplayCount+s3DisplayCount)
+	if rdsDisplayCount > 0 {
+		fmt.Fprintf(w, "RDS instances analyzed: %d\n", rdsDisplayCount)
+	}
+	fmt.Fprintf(w, "Total resources analyzed: %d\n", totalCount)
 
 	// Print EC2 summary if there are any instances
 	if len(ec2Items) > 0 {
@@ -113,6 +143,11 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	// Print S3 summary if there are any buckets
 	if len(s3Items) > 0 {
 		printS3Summary(w, s3Items, colorize)
+	}
+
+	// Print RDS summary if there are any instances
+	if len(rdsItems) > 0 {
+		printRDSSummary(w, rdsItems, colorize)
 	}
 
 	// Print EC2 instance details
@@ -140,6 +175,20 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 
 		for i, item := range s3Items {
 			printS3Details(w, i+1, item, colorize)
+		}
+	}
+
+	// Print RDS instance details
+	if len(rdsItems) > 0 {
+		printRDSDetailsHeader(w, colorize)
+
+		// Sort instances by ID for consistent display
+		sort.Slice(rdsItems, func(i, j int) bool {
+			return rdsItems[i].RDSInstance.InstanceID < rdsItems[j].RDSInstance.InstanceID
+		})
+
+		for i, item := range rdsItems {
+			printRDSDetails(w, i+1, item, colorize)
 		}
 	}
 }
@@ -196,6 +245,39 @@ func extractInstanceID(analysis string) string {
 			if endPos > 0 {
 				id := strings.TrimSpace(idPart[:endPos])
 				if strings.HasPrefix(id, "i-") {
+					return id
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func extractRDSInstanceID(analysis string) string {
+	// Look for "RDS Instance Analysis: INSTANCE_ID" pattern
+	if strings.Contains(analysis, "RDS Instance Analysis:") {
+		parts := strings.Split(analysis, "RDS Instance Analysis:")
+		if len(parts) > 1 {
+			idPart := strings.TrimSpace(parts[1])
+			endPos := strings.Index(idPart, "\n")
+			if endPos > 0 {
+				return strings.TrimSpace(idPart[:endPos])
+			}
+		}
+	}
+
+	// Look for "ID: DATABASE_ID" pattern
+	if strings.Contains(analysis, "**ID**:") {
+		parts := strings.Split(analysis, "**ID**:")
+		if len(parts) > 1 {
+			idPart := strings.TrimSpace(parts[1])
+			endPos := strings.Index(idPart, "\n")
+			if endPos > 0 {
+				id := strings.TrimSpace(idPart[:endPos])
+				// RDS IDs typically don't have a prefix like i- for EC2
+				// This is a simple check - may need to be improved
+				if !strings.HasPrefix(id, "i-") && strings.Contains(analysis, "RDS") {
 					return id
 				}
 			}
@@ -340,6 +422,58 @@ func printS3Summary(w io.Writer, s3Items []ReportItem, colorize bool) {
 	fmt.Fprintln(w)
 }
 
+// printRDSSummary prints a summary table of RDS instances
+func printRDSSummary(w io.Writer, rdsItems []ReportItem, colorize bool) {
+	if len(rdsItems) == 0 {
+		return
+	}
+
+	// Print section header
+	if colorize {
+		fmt.Fprintf(w, "\n%sRDS INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
+		fmt.Fprintln(w, strings.Repeat("-", 22))
+	} else {
+		fmt.Fprintln(w, "\nRDS INSTANCES SUMMARY")
+		fmt.Fprintln(w, strings.Repeat("-", 22))
+	}
+
+	// Print table header
+	headers := []string{"INSTANCE ID", "TYPE", "ENGINE", "CPU AVG", "STORAGE USED", "STATUS"}
+	fmt.Fprintf(w, "%-20s %-15s %-15s %-10s %-15s %-10s\n",
+		headers[0], headers[1], headers[2], headers[3], headers[4], headers[5])
+	fmt.Fprintln(w, strings.Repeat("-", 90))
+
+	// Print table rows - only for valid RDS instances
+	for _, item := range rdsItems {
+		if item.RDSInstance.InstanceID == "" {
+			continue // Skip entries without an instance ID
+		}
+
+		status := getRDSEfficiencyStatus(item.RDSInstance.CPUAvg7d)
+		statusText := status
+
+		if colorize {
+			switch status {
+			case "CRITICAL":
+				statusText = ColorRed + status + ColorReset
+			case "WARNING":
+				statusText = ColorYellow + status + ColorReset
+			case "GOOD":
+				statusText = ColorGreen + status + ColorReset
+			}
+		}
+
+		fmt.Fprintf(w, "%-20s %-15s %-15s %-10.1f%% %-15.1f%% %-10s\n",
+			item.RDSInstance.InstanceID,
+			item.RDSInstance.InstanceType,
+			item.RDSInstance.Engine,
+			item.RDSInstance.CPUAvg7d,
+			item.RDSInstance.StorageUsed,
+			statusText)
+	}
+	fmt.Fprintln(w)
+}
+
 // Print EC2 details section header
 func printEC2DetailsHeader(w io.Writer, colorize bool) {
 	if colorize {
@@ -359,6 +493,17 @@ func printS3DetailsHeader(w io.Writer, colorize bool) {
 	} else {
 		fmt.Fprintln(w, "\nS3 BUCKET DETAILS")
 		fmt.Fprintln(w, strings.Repeat("=", 16))
+	}
+}
+
+// Print RDS details section header
+func printRDSDetailsHeader(w io.Writer, colorize bool) {
+	if colorize {
+		fmt.Fprintf(w, "\n%sRDS INSTANCE DETAILS%s\n", ColorBold+ColorBlue, ColorReset)
+		fmt.Fprintln(w, strings.Repeat("=", 19))
+	} else {
+		fmt.Fprintln(w, "\nRDS INSTANCE DETAILS")
+		fmt.Fprintln(w, strings.Repeat("=", 19))
 	}
 }
 
@@ -488,8 +633,58 @@ func printS3Details(w io.Writer, index int, item ReportItem, colorize bool) {
 	fmt.Fprintln(w, item.Analysis)
 }
 
+// printRDSDetails prints detailed analysis for an RDS instance
+func printRDSDetails(w io.Writer, index int, item ReportItem, colorize bool) {
+	// Section header
+	title := fmt.Sprintf("RDS Instance %d: %s (%s)", index, item.RDSInstance.InstanceID, item.RDSInstance.InstanceType)
+	if colorize {
+		fmt.Fprintf(w, "\n%s%s%s\n", ColorBold+ColorBlue, title, ColorReset)
+		fmt.Fprintln(w, strings.Repeat("-", len(title)))
+	} else {
+		fmt.Fprintf(w, "\n%s\n", title)
+		fmt.Fprintln(w, strings.Repeat("-", len(title)))
+	}
+
+	// Instance metadata
+	fmt.Fprintf(w, "Engine: %s %s\n", item.RDSInstance.Engine, item.RDSInstance.EngineVersion)
+	fmt.Fprintf(w, "Storage: %d GB (%s)\n", item.RDSInstance.AllocatedStorage, item.RDSInstance.StorageType)
+	fmt.Fprintf(w, "Multi-AZ: %t\n", item.RDSInstance.MultiAZ)
+
+	if !item.RDSInstance.LaunchTime.IsZero() {
+		fmt.Fprintf(w, "Launch Time: %s\n", item.RDSInstance.LaunchTime.Format(time.RFC3339))
+	}
+
+	fmt.Fprintf(w, "CPU Utilization (7-day avg): %.1f%%\n", item.RDSInstance.CPUAvg7d)
+	fmt.Fprintf(w, "Storage Used: %.1f%%\n", item.RDSInstance.StorageUsed)
+	fmt.Fprintf(w, "Connections (7-day avg): %.1f\n", item.RDSInstance.ConnectionsAvg7d)
+	fmt.Fprintf(w, "IOPS (7-day avg): %.1f\n", item.RDSInstance.IOPSAvg7d)
+
+	// Tags
+	if len(item.RDSInstance.Tags) > 0 {
+		fmt.Fprintln(w, "Tags:")
+		for k, v := range item.RDSInstance.Tags {
+			fmt.Fprintf(w, "  %s: %s\n", k, v)
+		}
+	}
+
+	// Analysis (keep original formatting)
+	fmt.Fprintln(w, "\nANALYSIS:")
+	fmt.Fprintln(w, item.Analysis)
+}
+
 // getEfficiencyStatus returns a status based on CPU utilization
 func getEfficiencyStatus(cpuAvg float64) string {
+	if cpuAvg < 5 {
+		return "CRITICAL"
+	} else if cpuAvg < 20 {
+		return "WARNING"
+	} else {
+		return "GOOD"
+	}
+}
+
+// getRDSEfficiencyStatus returns a status based on CPU utilization
+func getRDSEfficiencyStatus(cpuAvg float64) string {
 	if cpuAvg < 5 {
 		return "CRITICAL"
 	} else if cpuAvg < 20 {

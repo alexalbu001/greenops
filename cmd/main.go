@@ -17,8 +17,9 @@ import (
 
 // ServerRequest represents incoming payload of resources to analyze
 type ServerRequest struct {
-	Instances []pkg.Instance `json:"instances"`
-	S3Buckets []pkg.S3Bucket `json:"s3_buckets"`
+	Instances    []pkg.Instance    `json:"instances"`
+	S3Buckets    []pkg.S3Bucket    `json:"s3_buckets"`
+	RDSInstances []pkg.RDSInstance `json:"rds_instances"`
 }
 
 // Handler is the Lambda entrypoint
@@ -49,7 +50,7 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 	}
 
 	// Validate request
-	totalResources := len(req.Instances) + len(req.S3Buckets)
+	totalResources := len(req.Instances) + len(req.S3Buckets) + len(req.RDSInstances)
 	if totalResources == 0 {
 		log.Printf("request contained no resources to analyze")
 		return events.APIGatewayV2HTTPResponse{
@@ -81,6 +82,9 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 	}
 	if len(req.S3Buckets) > 0 {
 		resourceTypes = append(resourceTypes, "s3")
+	}
+	if len(req.RDSInstances) > 0 {
+		resourceTypes = append(resourceTypes, "rds")
 	}
 
 	jobID, err := pkg.CreateJob(ctx, dynamoClient, resourceTypes, totalResources)
@@ -128,6 +132,23 @@ func Handler(ctx context.Context, apiReq events.APIGatewayV2HTTPRequest) (events
 			// Continue with other resources even if one fails
 		}
 	}
+	itemIndex += len(req.S3Buckets)
+
+	for i, rdsInstance := range req.RDSInstances {
+		workItem := pkg.WorkItem{
+			JobID:       jobID,
+			ItemIndex:   itemIndex + i,
+			ItemType:    "rds",
+			RDSInstance: rdsInstance,
+		}
+
+		err := pkg.QueueWorkItem(ctx, sqsClient, jobID, itemIndex+i, "rds", workItem)
+		if err != nil {
+			log.Printf("failed to queue RDS instance %s: %v", rdsInstance.InstanceID, err)
+			// Continue with other resources even if one fails
+		}
+	}
+	itemIndex += len(req.RDSInstances)
 
 	// Update job status to processing
 	err = pkg.UpdateJobStatus(ctx, dynamoClient, jobID, pkg.JobStatusProcessing)

@@ -30,6 +30,13 @@ type EC2Scanner struct {
 	MaxItems  int
 }
 
+type RDSScanner struct {
+	RDSClient *rds.Client
+	CWClient  *cloudwatch.Client
+	DaysBack  int
+	MaxItems  int
+}
+
 // Scan implements ResourceScanner interface
 func (s *EC2Scanner) Scan(ctx context.Context) (interface{}, error) {
 	log.Printf("Scanning EC2 instances (past %d days)...", s.DaysBack)
@@ -94,17 +101,22 @@ func (s *EBSScanner) Name() string {
 	return "ebs"
 }
 
-// RDSScanner scans RDS instances (placeholder for future implementation)
-type RDSScanner struct {
-	RDSClient *rds.Client
-	CWClient  *cloudwatch.Client
-	DaysBack  int
-}
-
 // Scan implements ResourceScanner interface
 func (s *RDSScanner) Scan(ctx context.Context) (interface{}, error) {
-	log.Println("RDS instance scanning not yet implemented")
-	return nil, fmt.Errorf("RDS scanning not implemented")
+	log.Printf("Scanning RDS instances (past %d days)...", s.DaysBack)
+	instances, err := ListRDSInstances(ctx, s.RDSClient, s.CWClient, s.MaxItems)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply limit if specified and not already applied
+	if s.MaxItems > 0 && len(instances) > s.MaxItems {
+		log.Printf("Limiting RDS scan to %d instances (found %d)", s.MaxItems, len(instances))
+		instances = instances[:s.MaxItems]
+	}
+
+	log.Printf("RDS scan completed: found %d instances", len(instances))
+	return instances, nil
 }
 
 // Name implements ResourceScanner interface
@@ -144,6 +156,7 @@ func ScanResources(ctx context.Context, cfg aws.Config, resourceTypes []string, 
 			RDSClient: rdsClient,
 			CWClient:  cwClient,
 			DaysBack:  daysBack,
+			MaxItems:  maxItems,
 		},
 		"s3": &S3Scanner{
 			S3Client: s3Client,

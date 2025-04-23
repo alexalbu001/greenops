@@ -10,8 +10,8 @@ type ResourceType string
 const (
 	ResourceTypeEC2 ResourceType = "ec2"
 	ResourceTypeS3  ResourceType = "s3"
-	ResourceTypeEBS ResourceType = "ebs"
 	ResourceTypeRDS ResourceType = "rds"
+	ResourceTypeEBS ResourceType = "ebs"
 )
 
 // ReportItem represents a single analyzed resource
@@ -19,6 +19,7 @@ type ReportItem struct {
 	ResourceType ResourceType `json:"resource_type,omitempty"`
 	Instance     Instance     `json:"instance,omitempty"`
 	S3Bucket     S3Bucket     `json:"s3_bucket,omitempty"`
+	RDSInstance  RDSInstance  `json:"rds_instance,omitempty"`
 	Embedding    []float64    `json:"embedding,omitempty"`
 	Analysis     string       `json:"analysis"`
 }
@@ -37,6 +38,10 @@ func (r *ReportItem) GetResourceType() ResourceType {
 
 	if !IsEmptyObject(r.S3Bucket) && r.S3Bucket.BucketName != "" {
 		return ResourceTypeS3
+	}
+
+	if !IsEmptyObject(r.RDSInstance) && r.RDSInstance.InstanceID != "" {
+		return ResourceTypeRDS
 	}
 
 	// Default to EC2 for backward compatibility
