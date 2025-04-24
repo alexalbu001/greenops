@@ -11,3 +11,4 @@ build*
 worker
 *results*
 .env*
+.DS_Store

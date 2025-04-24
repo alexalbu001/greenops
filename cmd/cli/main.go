@@ -218,12 +218,11 @@ func main() {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	}
 
-	// Show help if requested
-	if len(os.Args) == 1 || (len(os.Args) == 2 && (os.Args[1] == "-h" || os.Args[1] == "--help")) {
+	// Show help only if explicitly requested with -h or --help
+	if len(os.Args) == 2 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
 		printUsageInfo()
 		return
 	}
-
 	// Setup logger
 	if debug {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -528,7 +527,6 @@ func main() {
 			}
 			defer file.Close()
 
-			// Use our formatter for better output
 			pkg.FormatAnalysisReport(file, apiResponse.Report, false) // No colors in file output
 			log.Printf("Results saved to %s", outputFile)
 		} else {

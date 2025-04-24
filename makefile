@@ -30,5 +30,5 @@ clean:
 	rm -f bootstrap function.zip worker.zip
 
 # Deploy with Terraform
-deploy: build
+deploy:
 	terraform apply -auto-approve
