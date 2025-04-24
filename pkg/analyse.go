@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,50 +15,20 @@ import (
 // AnalysisResult holds the structured LLM output for an instance
 // - ID: the instance identifier
 // - Analysis: the raw text recommendation
-// For MVP, we treat Analysis as a freeform string.
 type AnalysisResult struct {
 	ID       string `json:"id"`
 	Analysis string `json:"analysis"`
 }
 
-// analyzeInstance sends a prompt about an EC2 record to a Bedrock text model
-// and returns the completion text. It handles Titan, Lite V1, and Claude schemas.
-// analyzeInstance sends a prompt about an EC2 record to a Bedrock text model
-// and returns the completion text. It handles Titan, Lite V1, and Claude schemas.
-// This function needs to be updated to ensure the EC2 analysis
-// follows the same format as RDS and S3 for CO2 footprint data
-
-// AnalyzeInstance sends a prompt about an EC2 record to a Bedrock text model
-// and returns the completion text. It handles Titan, Lite V1, and Claude schemas.
-func AnalyzeInstance(ctx context.Context, client *bedrockruntime.Client, invocationID, recordJSON string, cpuAvg float64) (string, error) {
-	// Compose prompt with formatting guidelines for consistent output
-	prompt := fmt.Sprintf(`This is a cloud optimisation tool thats also helping with sustenability efforts. Keep a clean formatting and dont use any "*" or "#". Here is an EC2 instance record. :
-%s
-
-Metrics: 7-day average CPU utilization of %.1f%%.
-
-Please analyze this EC2 instance for sustainability and cost optimization. 
-Your analysis should include:
-1) Identify any inefficiencies (over-provisioning, idle time).
-2) Estimate monthly CO2 footprint (0.0002 kg CO2 per vCPU-hour).
-3) Suggest a rightsizing or shutdown action.
-4) Provide security recommendations
-5) Provide SUSTENABILITY TIPS for this finding
-
-IMPORTANT: Include a "Cost & Environmental Impact" section with the following format:
-Cost & Environmental Impact
-- Estimated Monthly Cost: $X.XX
-- Potential Optimized Cost: $X.XX
-- Monthly Savings Potential*: $X.XX (XX.X%%)
-- CO2 Footprint: X.XX kg CO2 per month
-`, recordJSON, cpuAvg)
-
+// InvokeBedrockModel is a general-purpose function for sending prompts to any Bedrock model
+// and handling the various response formats consistently
+func InvokeBedrockModel(ctx context.Context, client *bedrockruntime.Client, modelID string, prompt string) (string, error) {
 	var body []byte
 	var err error
 
 	// Check if it's an inference profile (contains "inference-profile" in the ARN)
-	if strings.Contains(invocationID, "inference-profile") &&
-		(strings.Contains(invocationID, "anthropic") || strings.Contains(invocationID, "claude")) {
+	if strings.Contains(modelID, "inference-profile") &&
+		(strings.Contains(modelID, "anthropic") || strings.Contains(modelID, "claude")) {
 		// Claude 3 schema for Bedrock via inference profile
 		payload := map[string]interface{}{
 			"anthropic_version": "bedrock-2023-05-31",
@@ -75,7 +44,7 @@ Cost & Environmental Impact
 			},
 		}
 		body, err = json.Marshal(payload)
-	} else if strings.Contains(invocationID, "anthropic") || strings.Contains(invocationID, "claude") {
+	} else if strings.Contains(modelID, "anthropic") || strings.Contains(modelID, "claude") {
 		// Standard Claude model (not an inference profile)
 		payload := map[string]interface{}{
 			"anthropic_version": "bedrock-2023-05-31",
@@ -91,7 +60,7 @@ Cost & Environmental Impact
 			},
 		}
 		body, err = json.Marshal(payload)
-	} else if strings.Contains(invocationID, "text-lite-v1") {
+	} else if strings.Contains(modelID, "text-lite-v1") {
 		// Titan Text Lite V1 schema
 		payload := map[string]interface{}{
 			"inputText": prompt,
@@ -117,140 +86,101 @@ Cost & Environmental Impact
 	}
 
 	// Log what we're about to send
-	log.Printf("Invoking model ID: %s with payload: %s", invocationID, string(body))
+	log.Printf("Invoking model ID: %s with payload length: %d bytes", modelID, len(body))
+	if len(body) < 1000 { // Only log full payload if it's small
+		log.Printf("Payload: %s", string(body))
+	}
 
 	// Invoke model/profile
 	resp, err := client.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
-		ModelId:     aws.String(invocationID),
+		ModelId:     aws.String(modelID),
 		ContentType: aws.String("application/json"),
 		Body:        body,
 	})
 	if err != nil {
-		return "", fmt.Errorf("generation invoke error for %s: %w", invocationID, err)
+		return "", fmt.Errorf("generation invoke error for %s: %w", modelID, err)
 	}
 
 	data := resp.Body
-	log.Printf("Raw generation response: %s", string(data))
+	log.Printf("Received response with length: %d bytes", len(data))
 
-	// Parse different response formats...
-	// (existing code for parsing response remains the same)
-	// ...
-
-	// If we didn't get a properly formatted Cost & Environmental Impact section,
-	// we should add one to maintain format consistency
+	// Extract the text response
 	result := extractTextFromResponse(data)
-
-	// Check if the response has the properly formatted section
-	if !strings.Contains(result, "CO2 Footprint:") {
-		// We need to extract the CO2 calculation and reformat
-		co2Value := extractCO2Value(result)
-
-		// Calculate the potential savings based on CPU utilization
-		var potentialSavings float64
-		if cpuAvg < 5 {
-			// If CPU is very low, estimate high savings (80%)
-			potentialSavings = 0.8
-		} else if cpuAvg < 20 {
-			// If CPU is low, estimate medium savings (50%)
-			potentialSavings = 0.5
-		} else if cpuAvg < 40 {
-			// If CPU is moderate, estimate small savings (30%)
-			potentialSavings = 0.3
-		} else {
-			// If CPU is high, estimate minimal savings (10%)
-			potentialSavings = 0.1
-		}
-
-		// Estimate cost based on instance type (this is a very rough estimate)
-		instanceType := extractInstanceType(result)
-		monthlyCost := estimateEC2MonthlyCost(instanceType)
-
-		// Calculate optimized cost and savings
-		optimizedCost := monthlyCost * (1 - potentialSavings)
-		savingsAmount := monthlyCost - optimizedCost
-
-		// Format the Cost & Environmental Impact section
-		costSection := fmt.Sprintf(`
-Cost & Environmental Impact
-- Estimated Monthly Cost: $%.2f
-- Potential Optimized Cost: $%.2f
-- Monthly Savings Potential: $%.2f (%.1f%%)
-- CO2 Footprint: %.3f kg CO2 per month
-`, monthlyCost, optimizedCost, savingsAmount, potentialSavings*100, co2Value)
-
-		// If there's an existing section with "CO2 Footprint Calculation" or similar, replace it
-		// Otherwise, append the new section before any recommendations
-		if idx := strings.Index(result, " CO2 Footprint"); idx > 0 {
-			// Find the next section
-			nextSection := strings.Index(result[idx:], "")
-			if nextSection > 0 {
-				// Replace the entire section
-				result = result[:idx] + costSection + result[idx+nextSection:]
-			} else {
-				// Replace to the end
-				result = result[:idx] + costSection
-			}
-		} else if idx := strings.Index(result, " Environmental Impact"); idx > 0 {
-			// Find the next section
-			nextSection := strings.Index(result[idx:], "")
-			if nextSection > 0 {
-				// Replace the entire section
-				result = result[:idx] + costSection + result[idx+nextSection:]
-			} else {
-				// Replace to the end
-				result = result[:idx] + costSection
-			}
-		} else if idx := strings.Index(result, " Recommendations"); idx > 0 {
-			// Insert before recommendations
-			result = result[:idx] + costSection + result[idx:]
-		} else {
-			// Just append at the end
-			result += costSection
-		}
-	}
-
 	return result, nil
 }
 
-// Helper function to extract CO2 value from EC2 analysis
-func extractCO2Value(analysis string) float64 {
-	// Look for various CO2 calculation patterns
+// AnalyzeInstance sends a prompt about an EC2 record to a Bedrock text model
+// and returns the completion text.
+func AnalyzeInstance(ctx context.Context, client *bedrockruntime.Client, modelID string, recordJSON string, cpuAvg float64) (string, error) {
+	// Compose prompt with formatting guidelines for consistent output
+	prompt := fmt.Sprintf(`This is a cloud optimisation tool called GreenOps that's also helping with sustainability efforts. Here is an EC2 instance record:
+%s
 
-	// Pattern 1: X.XXX kg CO2 per month
-	re := regexp.MustCompile(`([\d\.]+)\s*kg CO2 per month`)
-	if matches := re.FindStringSubmatch(analysis); len(matches) > 1 {
-		if value, err := strconv.ParseFloat(matches[1], 64); err == nil {
-			return value
-		}
+Metrics: 7-day average CPU utilization of %.1f%%.
+
+Please analyze this EC2 instance for sustainability and cost optimization. 
+Your analysis must include:
+1) Calculate monthly CO2 footprint using the formula: vCPUs × 24 hours × 30 days × 0.0002 kg CO2/vCPU-hour
+2) Estimate monthly cost based on the instance type and region
+3) Calculate potential cost and CO2 savings if the instance was rightsized or optimized
+4) Identify any inefficiencies (over-provisioning, idle time)
+5) Suggest specific rightsizing or shutdown actions
+6) Provide security recommendations
+7) Provide SUSTAINABILITY TIPS for this finding
+
+FOLLOW THIS EXACT FORMAT FOR YOUR ANALYSIS:
+
+# EC2 Instance Analysis: [INSTANCE_ID]
+
+## Performance Metrics
+- CPU Utilization (7-day avg): [PERCENTAGE]%
+- [OTHER METRICS IF AVAILABLE]
+
+## Analysis
+
+[1-2 paragraphs general description]
+
+### Inefficiencies Identified
+
+1. [ISSUE 1]: [DESCRIPTION]
+2. [ISSUE 2]: [DESCRIPTION]
+3. [ISSUE 3]: [DESCRIPTION]
+
+## Recommendations
+
+1. [CATEGORY 1]:
+   - [ACTION ITEM]
+   - [ACTION ITEM]
+
+2. [CATEGORY 2]:
+   - [ACTION ITEM]
+   - [ESTIMATED IMPACT]
+
+## Cost & Environmental Impact
+- Estimated Monthly Cost: $X.XX
+- Potential Optimized Cost: $X.XX
+- Monthly Savings Potential: $X.XX (XX.X%)
+- CO2 Footprint: X.XX kg CO2 per month
+
+## Security Considerations
+
+1. [SECURITY ITEM 1]: [DESCRIPTION]
+2. [SECURITY ITEM 2]: [DESCRIPTION]
+
+## Sustainability Tips
+
+1. [TIP 1]: [DESCRIPTION]
+2. [TIP 2]: [DESCRIPTION]
+3. [TIP 3]: [DESCRIPTION]
+`, recordJSON, cpuAvg)
+
+	// Use the general-purpose function to invoke Bedrock
+	result, err := InvokeBedrockModel(ctx, client, modelID, prompt)
+	if err != nil {
+		return "", err
 	}
 
-	// Pattern 2: X.XXX kg CO2/month
-	re = regexp.MustCompile(`([\d\.]+)\s*kg CO2/month`)
-	if matches := re.FindStringSubmatch(analysis); len(matches) > 1 {
-		if value, err := strconv.ParseFloat(matches[1], 64); err == nil {
-			return value
-		}
-	}
-
-	// Pattern 3: Monthly CO2 footprint: X.XXX kg
-	re = regexp.MustCompile(`Monthly CO2 footprint.*?(\d+\.\d+)`)
-	if matches := re.FindStringSubmatch(analysis); len(matches) > 1 {
-		if value, err := strconv.ParseFloat(matches[1], 64); err == nil {
-			return value
-		}
-	}
-
-	// Pattern 4: X vCPUs × Y hours × Z days × 0.0002 kg CO2/vCPU-hour = X.XXX kg
-	re = regexp.MustCompile(`(\d+)\s*vCPUs.*?(\d+)\s*hours.*?(\d+)\s*days.*?0\.0002`)
-	if matches := re.FindStringSubmatch(analysis); len(matches) > 3 {
-		vCPUs, _ := strconv.ParseFloat(matches[1], 64)
-		hours, _ := strconv.ParseFloat(matches[2], 64)
-		days, _ := strconv.ParseFloat(matches[3], 64)
-		return vCPUs * hours * days * 0.0002
-	}
-
-	// Default estimate based on t3.small (2 vCPUs)
-	return 2 * 24 * 30 * 0.0002 // 0.288 kg CO2 per month
+	return result, nil
 }
 
 // Extract instance type from analysis
@@ -260,85 +190,6 @@ func extractInstanceType(analysis string) string {
 		return matches[1]
 	}
 	return "t3.small" // Default if not found
-}
-
-// Rough estimate of monthly cost for EC2 instance type
-func estimateEC2MonthlyCost(instanceType string) float64 {
-	// This is a very simplified pricing model
-	// In a real implementation, you'd use the AWS Price List API
-
-	// Extract the family and size
-	parts := strings.Split(instanceType, ".")
-	if len(parts) < 2 {
-		return 15.00 // Default to $15/month if we can't parse
-	}
-
-	family := parts[0]
-	size := parts[1]
-
-	// Base price per hour for t3.micro
-	basePrice := 0.0104 // $0.0104 per hour
-
-	// Apply family multiplier
-	familyMultiplier := 1.0
-	switch family {
-	case "t2":
-		familyMultiplier = 0.8
-	case "t3":
-		familyMultiplier = 1.0
-	case "t4g":
-		familyMultiplier = 0.8
-	case "m5":
-		familyMultiplier = 1.5
-	case "m6g":
-		familyMultiplier = 1.4
-	case "c5":
-		familyMultiplier = 1.6
-	case "r5":
-		familyMultiplier = 1.8
-	default:
-		familyMultiplier = 1.0
-	}
-
-	// Apply size multiplier
-	sizeMultiplier := 1.0
-	switch size {
-	case "nano":
-		sizeMultiplier = 0.25
-	case "micro":
-		sizeMultiplier = 0.5
-	case "small":
-		sizeMultiplier = 1.0
-	case "medium":
-		sizeMultiplier = 2.0
-	case "large":
-		sizeMultiplier = 4.0
-	case "xlarge":
-		sizeMultiplier = 8.0
-	case "2xlarge":
-		sizeMultiplier = 16.0
-	case "4xlarge":
-		sizeMultiplier = 32.0
-	case "8xlarge":
-		sizeMultiplier = 64.0
-	case "16xlarge":
-		sizeMultiplier = 128.0
-	default:
-		// Try to extract size multiplier from format like "2xlarge"
-		if numSize := strings.TrimSuffix(size, "xlarge"); numSize != size {
-			if num, err := strconv.Atoi(numSize); err == nil {
-				sizeMultiplier = float64(num) * 8.0
-			}
-		}
-	}
-
-	// Calculate hourly cost
-	hourlyCost := basePrice * familyMultiplier * sizeMultiplier
-
-	// Convert to monthly (730 hours per month on average)
-	monthlyCost := hourlyCost * 730.0
-
-	return monthlyCost
 }
 
 // Helper function to extract text from various response formats

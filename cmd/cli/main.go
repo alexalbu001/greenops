@@ -62,7 +62,6 @@ func init() {
 	flag.IntVar(&pollInterval, "poll-interval", 5, "Polling interval in seconds for async mode")
 	flag.IntVar(&maxPollRetry, "poll-max", 60, "Maximum number of polling attempts")
 	flag.StringVar(&resources, "resources", "ec2,s3,rds", "Comma-separated list of resources to scan (ec2,s3,rds)")
-	flag.StringVar(&pdfOutput, "pdf", "", "Export results to PDF file")
 	flag.BoolVar(&verbose, "verbose", false, "Show debug and scan logs (stderr)")
 }
 
@@ -456,14 +455,6 @@ func main() {
 			// Print to console using our formatter
 			pkg.FormatAnalysisReport(os.Stdout, report, useColors)
 		}
-		if pdfOutput != "" {
-			log.Printf("Exporting results to PDF: %s", pdfOutput)
-			if err := pkg.ExportReportToPDF(report, pdfOutput); err != nil {
-				log.Printf("Error generating PDF: %v", err)
-			} else {
-				log.Printf("PDF export complete: %s", pdfOutput)
-			}
-		}
 	} else {
 		// Synchronous mode
 		log.Printf("Sending %d resources to GreenOps API for analysis with timeout of %d seconds...",
@@ -546,14 +537,6 @@ func main() {
 
 			// Print to console using our formatter
 			pkg.FormatAnalysisReport(os.Stdout, apiResponse.Report, useColors)
-		}
-		if pdfOutput != "" {
-			log.Printf("Exporting results to PDF: %s", pdfOutput)
-			if err := pkg.ExportReportToPDF(apiResponse.Report, pdfOutput); err != nil {
-				log.Printf("Error generating PDF: %v", err)
-			} else {
-				log.Printf("PDF export complete: %s", pdfOutput)
-			}
 		}
 	}
 }

@@ -141,21 +141,6 @@ func FormatAnalysisReport(w io.Writer, report []ReportItem, colorize bool) {
 	}
 	fmt.Fprintf(w, "Total resources analyzed: %d\n", totalCount)
 
-	// Print EC2 summary if there are any instances
-	// if len(ec2Items) > 0 {
-	// 	printEC2Summary(w, ec2Items, colorize)
-	// }
-
-	// // Print S3 summary if there are any buckets
-	// if len(s3Items) > 0 {
-	// 	printS3Summary(w, s3Items, colorize)
-	// }
-
-	// // Print RDS summary if there are any instances
-	// if len(rdsItems) > 0 {
-	// 	printRDSSummary(w, rdsItems, colorize)
-	// }
-
 	// Print EC2 instance details
 	if len(ec2Items) > 0 {
 		printEC2DetailsHeader(w, colorize)
@@ -516,126 +501,6 @@ func printHeader(w io.Writer, title string, colorize bool) {
 	}
 }
 
-// printEC2Summary prints a summary table of EC2 instances
-// func printEC2Summary(w io.Writer, ec2Items []ReportItem, colorize bool) {
-// 	if len(ec2Items) == 0 {
-// 		return
-// 	}
-// 	// Section title
-// 	if colorize {
-// 		fmt.Fprintf(w, "\n%sEC2 INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
-// 	} else {
-// 		fmt.Fprintln(w, "\nEC2 INSTANCES SUMMARY")
-// 	}
-// 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-// 	// Header row
-// 	header := "INSTANCE ID\tTYPE\tCPU AVG (%)\tSTATUS"
-// 	if colorize {
-// 		header = ColorBold + ColorCyan + header + ColorReset
-// 	}
-// 	fmt.Fprintln(tw, header)
-
-// 	for _, item := range ec2Items {
-// 		id := item.Instance.InstanceID
-// 		typ := item.Instance.InstanceType
-// 		cpu := fmt.Sprintf("%.1f", item.Instance.CPUAvg7d)
-// 		status := getEfficiencyStatus(item.Instance.CPUAvg7d)
-// 		if colorize {
-// 			switch status {
-// 			case "CRITICAL":
-// 				status = ColorRed + status + ColorReset
-// 			case "WARNING":
-// 				status = ColorYellow + status + ColorReset
-// 			case "GOOD":
-// 				status = ColorGreen + status + ColorReset
-// 			}
-// 		}
-// 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", id, typ, cpu, status)
-// 	}
-// 	tw.Flush()
-// }
-
-// // printS3Summary prints a summary table of S3 buckets
-// func printS3Summary(w io.Writer, s3Items []ReportItem, colorize bool) {
-// 	if len(s3Items) == 0 {
-// 		return
-// 	}
-// 	if colorize {
-// 		fmt.Fprintf(w, "\n%sS3 BUCKETS SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
-// 	} else {
-// 		fmt.Fprintln(w, "\nS3 BUCKETS SUMMARY")
-// 	}
-// 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-// 	header := "BUCKET NAME\tSIZE (GB)\tOBJECTS\tLIFECYCLE"
-// 	if colorize {
-// 		header = ColorBold + ColorCyan + header + ColorReset
-// 	}
-// 	fmt.Fprintln(tw, header)
-
-// 	for _, item := range s3Items {
-// 		b := item.S3Bucket
-// 		name := b.BucketName
-// 		sizeGB := fmt.Sprintf("%.2f", float64(b.SizeBytes)/(1024*1024*1024))
-// 		objs := fmt.Sprintf("%d", b.ObjectCount)
-// 		lifecycle := "MISSING"
-// 		if len(b.LifecycleRules) > 0 {
-// 			lifecycle = "CONFIGURED"
-// 		}
-// 		if colorize {
-// 			switch lifecycle {
-// 			case "MISSING":
-// 				lifecycle = ColorRed + lifecycle + ColorReset
-// 			case "CONFIGURED":
-// 				lifecycle = ColorGreen + lifecycle + ColorReset
-// 			default:
-// 				lifecycle = ColorYellow + lifecycle + ColorReset
-// 			}
-// 		}
-// 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, sizeGB, objs, lifecycle)
-// 	}
-// 	tw.Flush()
-// }
-
-// // printRDSSummary prints a summary table of RDS instances
-// func printRDSSummary(w io.Writer, rdsItems []ReportItem, colorize bool) {
-// 	if len(rdsItems) == 0 {
-// 		return
-// 	}
-// 	if colorize {
-// 		fmt.Fprintf(w, "\n%sRDS INSTANCES SUMMARY%s\n", ColorBold+ColorBlue, ColorReset)
-// 	} else {
-// 		fmt.Fprintln(w, "\nRDS INSTANCES SUMMARY")
-// 	}
-// 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-// 	header := "INSTANCE ID\tTYPE\tENGINE\tCPU AVG (%)\tSTORAGE USED (%)\tSTATUS"
-// 	if colorize {
-// 		header = ColorBold + ColorCyan + header + ColorReset
-// 	}
-// 	fmt.Fprintln(tw, header)
-
-// 	for _, item := range rdsItems {
-// 		r := item.RDSInstance
-// 		id := r.InstanceID
-// 		typ := r.InstanceType
-// 		engine := r.Engine
-// 		cpu := fmt.Sprintf("%.1f", r.CPUAvg7d)
-// 		storage := fmt.Sprintf("%.1f", r.StorageUsed)
-// 		status := getRDSEfficiencyStatus(r.CPUAvg7d)
-// 		if colorize {
-// 			switch status {
-// 			case "CRITICAL":
-// 				status = ColorRed + status + ColorReset
-// 			case "WARNING":
-// 				status = ColorYellow + status + ColorReset
-// 			case "GOOD":
-// 				status = ColorGreen + status + ColorReset
-// 			}
-// 		}
-// 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", id, typ, engine, cpu, storage, status)
-// 	}
-// 	tw.Flush()
-// }
-
 // Print EC2 details section header
 func printEC2DetailsHeader(w io.Writer, colorize bool) {
 	if colorize {
@@ -903,24 +768,24 @@ func printRDSDetails(w io.Writer, index int, item ReportItem, colorize bool) {
 	fmt.Fprintln(w, item.Analysis)                                 // Print analysis content as is
 }
 
-// getEfficiencyStatus returns a status based on CPU utilization
-func getEfficiencyStatus(cpuAvg float64) string {
-	if cpuAvg < 5 {
-		return "CRITICAL"
-	} else if cpuAvg < 20 {
-		return "WARNING"
-	} else {
-		return "GOOD"
-	}
-}
+// // getEfficiencyStatus returns a status based on CPU utilization
+// func getEfficiencyStatus(cpuAvg float64) string {
+// 	if cpuAvg < 5 {
+// 		return "CRITICAL"
+// 	} else if cpuAvg < 20 {
+// 		return "WARNING"
+// 	} else {
+// 		return "GOOD"
+// 	}
+// }
 
-// getRDSEfficiencyStatus returns a status based on CPU utilization
-func getRDSEfficiencyStatus(cpuAvg float64) string {
-	if cpuAvg < 5 {
-		return "CRITICAL"
-	} else if cpuAvg < 20 {
-		return "WARNING"
-	} else {
-		return "GOOD"
-	}
-}
+// // getRDSEfficiencyStatus returns a status based on CPU utilization
+// func getRDSEfficiencyStatus(cpuAvg float64) string {
+// 	if cpuAvg < 5 {
+// 		return "CRITICAL"
+// 	} else if cpuAvg < 20 {
+// 		return "WARNING"
+// 	} else {
+// 		return "GOOD"
+// 	}
+// }

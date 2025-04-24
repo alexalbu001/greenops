@@ -253,7 +253,6 @@ variable "embed_model_id" {
 variable "gen_profile_arn" {
   description = "Bedrock generation inference profile ARN"
   type        = string
-  default     = "arn:aws:bedrock:eu-west-1:767048271788:inference-profile/eu.anthropic.claude-3-7-sonnet-20250219-v1:0"
 }
 
 variable "gen_model_id" {

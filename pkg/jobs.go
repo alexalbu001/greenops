@@ -254,7 +254,7 @@ func extractReportItem(av types.AttributeValue, index int) (ReportItem, error) {
 	return reportItem, nil
 }
 
-// parseManually tries to manually extract data from a string representation
+// // parseManually tries to manually extract data from a string representation
 func parseManually(jsonStr string) (ReportItem, error) {
 	var reportItem ReportItem
 
@@ -339,50 +339,50 @@ func copyDynamoItemWithoutResults(item map[string]types.AttributeValue) map[stri
 }
 
 // Helper functions to safely extract values from a map
-func getStringValue(m map[string]interface{}, key string) string {
-	if val, ok := m[key]; ok {
-		if strVal, ok := val.(string); ok {
-			return strVal
-		}
-	}
-	return ""
-}
+// func getStringValue(m map[string]interface{}, key string) string {
+// 	if val, ok := m[key]; ok {
+// 		if strVal, ok := val.(string); ok {
+// 			return strVal
+// 		}
+// 	}
+// 	return ""
+// }
 
-func getIntValue(m map[string]interface{}, key string) int {
-	if val, ok := m[key]; ok {
-		switch v := val.(type) {
-		case int:
-			return v
-		case int64:
-			return int(v)
-		case float64:
-			return int(v)
-		case string:
-			if i, err := strconv.Atoi(v); err == nil {
-				return i
-			}
-		}
-	}
-	return 0
-}
+// func getIntValue(m map[string]interface{}, key string) int {
+// 	if val, ok := m[key]; ok {
+// 		switch v := val.(type) {
+// 		case int:
+// 			return v
+// 		case int64:
+// 			return int(v)
+// 		case float64:
+// 			return int(v)
+// 		case string:
+// 			if i, err := strconv.Atoi(v); err == nil {
+// 				return i
+// 			}
+// 		}
+// 	}
+// 	return 0
+// }
 
-func getInt64Value(m map[string]interface{}, key string) int64 {
-	if val, ok := m[key]; ok {
-		switch v := val.(type) {
-		case int64:
-			return v
-		case int:
-			return int64(v)
-		case float64:
-			return int64(v)
-		case string:
-			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
-				return i
-			}
-		}
-	}
-	return 0
-}
+// func getInt64Value(m map[string]interface{}, key string) int64 {
+// 	if val, ok := m[key]; ok {
+// 		switch v := val.(type) {
+// 		case int64:
+// 			return v
+// 		case int:
+// 			return int64(v)
+// 		case float64:
+// 			return int64(v)
+// 		case string:
+// 			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+// 				return i
+// 			}
+// 		}
+// 	}
+// 	return 0
+// }
 
 // UpdateJobProgress increments the completed items counter for a job
 func UpdateJobProgress(ctx context.Context, dynamoClient *dynamodb.Client, jobID string, success bool, result ReportItem) error {

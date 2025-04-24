@@ -10,3 +10,4 @@ build*
 !worker/*
 worker
 *results*
+.env*

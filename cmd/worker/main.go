@@ -106,11 +106,9 @@ func processEC2Instance(
 		return fmt.Errorf("embed error for %s: %v", instance.InstanceID, err)
 	}
 
-	// Analysis phase: Bedrock first
 	analysis, err := pkg.AnalyzeInstance(ctx, brClient, genID, record, instance.CPUAvg7d)
 	if err != nil || analysis == "" {
 		log.Printf("Bedrock analysis failed for EC2 %s: %v", instance.InstanceID, err)
-		// No local fallback for EC2—report error message
 		analysis = fmt.Sprintf("ERROR: Failed to analyze instance: %v", err)
 	}
 
@@ -166,11 +164,7 @@ func processS3Bucket(
 		return fmt.Errorf("embed error for bucket %s: %v", bucket.BucketName, err)
 	}
 
-	// Analysis phase: Bedrock first (45s timeout)
-	analysisCtx, cancelAnalysis := context.WithTimeout(processingCtx, 45*time.Second)
-	defer cancelAnalysis()
-
-	analysis, err := pkg.AnalyzeS3BucketWithBedrock(analysisCtx, brClient, genID, bucket, emb)
+	analysis, err := pkg.AnalyzeS3BucketWithBedrock(ctx, brClient, genID, bucket, emb)
 	if err != nil || analysis == "" {
 		log.Printf("Bedrock analysis failed for S3 %s: %v", bucket.BucketName, err)
 	}
@@ -208,9 +202,6 @@ func processRDSInstance(
 	instance := workItem.RDSInstance
 	log.Printf("Processing RDS instance: %s", instance.InstanceID)
 
-	processingCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	// Marshal instance
 	data, err := json.Marshal(instance)
 	if err != nil {
@@ -220,25 +211,16 @@ func processRDSInstance(
 	record := string(data)
 
 	// Embedding
-	emb, err := pkg.EmbedText(processingCtx, brClient, embedModel, record)
+	emb, err := pkg.EmbedText(ctx, brClient, embedModel, record)
 	if err != nil {
 		pkg.UpdateJobProgress(ctx, dynamoClient, workItem.JobID, false, pkg.ReportItem{})
 		return fmt.Errorf("embed error for RDS %s: %v", instance.InstanceID, err)
 	}
 
-	// Analysis phase: Bedrock first (45s timeout)
-	analysisCtx, cancelAnalysis := context.WithTimeout(processingCtx, 45*time.Second)
-	defer cancelAnalysis()
-
-	analysis, err := pkg.AnalyzeRDSInstanceWithBedrock(analysisCtx, brClient, genID, instance, emb)
+	analysis, err := pkg.AnalyzeRDSInstanceWithBedrock(ctx, brClient, genID, instance, emb)
 	if err != nil || analysis == "" {
 		log.Printf("Bedrock analysis failed for RDS %s: %v", instance.InstanceID, err)
-		// Fallback to local
-		if local, locErr := pkg.AnalyzeRDSInstance(ctx, instance); locErr == nil {
-			analysis = local.Analysis
-		} else {
-			analysis = fmt.Sprintf("ERROR: Failed to analyze RDS instance: %v", err)
-		}
+		analysis = fmt.Sprintf("ERROR: Failed to analyze RDS instance: %v", err)
 	}
 
 	// Update progress
