@@ -3,6 +3,7 @@
 
 GreenOps is a sustainability-focused CLI tool that analyzes AWS resources (EC2 instances, S3 buckets, and RDS databases) to provide optimization recommendations for reducing carbon footprint and costs.
 
+
 This project was developed as a single-person hackathon project to explore the intersection of cloud computing and sustainability.
 
 ## Prerequisites
