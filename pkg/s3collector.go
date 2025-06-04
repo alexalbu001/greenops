@@ -299,11 +299,8 @@ func getBucketStorageMetrics(ctx context.Context, client *s3.Client, bucketName 
 				storageClass = "STANDARD" // Default storage class
 			}
 
-			// Add size to totals - handle pointer properly
-			objSize := int64(0)
-			if obj.Size != nil {
-				objSize = *obj.Size
-			}
+			// Add size to totals
+			objSize := obj.Size
 
 			size += objSize
 			storageClasses[storageClass] += objSize
